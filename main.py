@@ -12,8 +12,10 @@ load_dotenv()
 # 配置页面的配置项
 st.set_page_config(
     page_title="AI智能助手平台",
-    page_icon="",
+    page_icon="🤖",
+    # 布局
     layout="wide",
+    # 侧边栏状态
     initial_sidebar_state="expanded",
     menu_items={}
 )
@@ -56,13 +58,19 @@ if prompt:
             model="deepseek-chat",
             messages=[
                 {"role": "system", "content": system_prompt},
-                *st.session_state.messages
+                *st.session_state.messages # 列表中的解包
             ],
-            stream=False
+            stream=True
         )
 
-    # 输出大模型返回的结果
-    st.chat_message("assistant").write(response.choices[0].message.content)
+    # 输出大模型返回的结果(流式输出的解析方式)
+    response_message = st.empty() # 创建一个空的组件，用于展示大模型返回的结果
+    full_response = ""
+    for chunk in response:
+        if chunk.choices[0].delta.content is not None:
+            content = chunk.choices[0].delta.content
+            full_response += content
+            response_message.chat_message("assistant").write(full_response)
 
     # 保存大模型返回的结果
-    st.session_state.messages.append({"role": "assistant", "content": response.choices[0].message.content})
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
