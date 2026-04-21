@@ -1,16 +1,12 @@
 # 将AI调用抽出来
-from backend.llm.client import get_client
 from fastapi.responses import StreamingResponse
 from backend.prompt.prompt_builder import build_system_prompt
 from backend.schema.chat_schema import ChatRequest
 
 # 核心逻辑
-def chat_with_ai(request: ChatRequest):
+def chat_with_ai(request: ChatRequest, client):
     # 加try-catch, 让程序员能看到真实错误
     try:
-        print("收到请求：", request)
-        client = get_client()
-
         system_prompt = build_system_prompt(request.role)
 
         # response = client.chat.completions.create(

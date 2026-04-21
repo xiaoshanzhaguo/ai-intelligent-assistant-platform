@@ -4,6 +4,7 @@ from openai import OpenAI
 import os
 import time
 import random
+import re
 
 # 配置页面的配置项
 st.set_page_config(
@@ -22,7 +23,7 @@ st.title("AI智能助手平台")
 # 实现多模式功能
 mode = st.sidebar.selectbox(
     "选择功能",
-    ["聊天", "总结", "翻译", "改写"]
+    ["聊天", "总结", "翻译", "改写", "工作流分析"]
 )
 
 # 初始化聊天信息
@@ -44,6 +45,46 @@ messages = st.session_state.messages[-MAX_HISTORY_LENGTH:]
 if st.sidebar.button("清空聊天"):
     st.session_state.messages = []
 
+icon_map = {
+    "【总结】": "🧠",
+    "【问题分析】": "🔍",
+    "【优化建议】": "✨"
+}
+
+# 工作流返回内容，进行结构化显示
+def format_response(text):
+    # 按【xxx】分割
+    parts = re.split(r"(【.*?】)", text)
+
+    formatted = ""
+    for i in range(1, len(parts), 2):
+        title = parts[i]  # 【总结】
+        content = parts[i + 1]  # 内容
+
+        icon = icon_map.get(title, "📌")
+
+        formatted += f"### {icon} {title}\n\n{content.strip()}\n"
+
+    return formatted
+
+# 流式阶段做结构化
+def format_partial(text):
+    parts = re.split(r"(【.*?】)", text) # 一定要加括号!
+
+    if len(parts) < 3:
+        return text # 还没解析出结构时，直接返回原文
+
+    formatted = ""
+    for i in range(1, len(parts), 2):
+        title = parts[i]
+        content = parts[i + 1] if i + 1 < len(parts) else ""
+
+        icon = icon_map.get(title, "📌")
+
+        formatted += f"\n\n### {icon} {title}\n\n{content.strip()}"
+
+    return formatted
+
 # 创建与AI大模型交互的客户端对象
 client = OpenAI(
     api_key=os.environ.get('DEEPSEEK_API_KEY'),
@@ -59,9 +100,14 @@ if prompt:
     # 保存用户输入的提示词
     st.session_state.messages.append({"role": "user", "content": prompt})
 
+    if mode == "工作流分析":
+        url = "http://127.0.0.1:8000/workflow_stream"
+    else:
+        url = "http://127.0.0.1:8000/chat_stream"
+
     # 调用AI，返回response，获取AI的回复
     response = requests.post(
-        "http://127.0.0.1:8000/chat_stream",
+        url,
         json={
             "message": prompt,
             "role": mode
@@ -78,8 +124,6 @@ if prompt:
             thinking_placeholder.markdown("思考中... 🤔")
 
             # 输出大模型返回的结果(流式输出的解析方式)
-            # response_container = None
-            # response_placeholder = None
             full_response = ""
             first_chunk = True
 
@@ -94,8 +138,9 @@ if prompt:
                     # 逐词输出
                     for char in text:
                         full_response += char
+                        formatted = format_partial(full_response)
                         # 显示内容 + 光标
-                        thinking_placeholder.markdown(full_response + "▌")
+                        thinking_placeholder.markdown(formatted + "▌")
                         # 1. 动态速度（前快后慢），并且设置随机微抖动（更自然）
                         base_speed = 0.005 if len(full_response) < 50 else 0.01
                         jitter = random.uniform(-0.002, 0.002)
@@ -106,7 +151,7 @@ if prompt:
                             time.sleep(max(0.001, base_speed + jitter))
 
             # 最后去掉光标, 最终渲染
-            thinking_placeholder.markdown(full_response)
+            thinking_placeholder.markdown(format_response(full_response))
 
             # 保存大模型返回的结果
             st.session_state.messages.append({"role": "assistant", "content": full_response})

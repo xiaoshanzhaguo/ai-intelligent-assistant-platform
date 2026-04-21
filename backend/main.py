@@ -2,7 +2,6 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from backend.api.chat import router as chat_router
 from pydantic import BaseModel
-from openai import OpenAI
 from backend.prompt.prompt_templates import ROLE_PROMPTS
 
 # 入口只做“注册路由”
