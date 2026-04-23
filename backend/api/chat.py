@@ -1,27 +1,31 @@
 from fastapi import APIRouter
-from starlette.responses import StreamingResponse
 
+from backend.llm.client import get_client
 from backend.schema.chat_schema import ChatRequest
 from backend.services.chat_service import chat_with_ai
 from backend.services.workflow_engine import run_workflow_stream
-from backend.llm.client import get_client
 
+# 路由注册器
 router = APIRouter()
 
-# 接口层，接收请求+调用service
 @router.post("/chat_stream")
 def chat_stream(request: ChatRequest):
+    """
+    聊天流式接口。
+
+    接收前端聊天请求，初始化模型客户端，
+    并调用聊天服务返回 SSE 事件流响应。
+    """
     client = get_client()
     return chat_with_ai(request, client)
 
-
-# 工作流接口
 @router.post("/workflow_stream")
 def workflow_stream(request: ChatRequest):
-    client = get_client() # 在接口层获取
+    """
+    工作流流式接口。
 
-    def generator():
-        for chunk in run_workflow_stream(request.message, client):
-            yield chunk
-
-    return StreamingResponse(generator(), media_type="text/plain")
+    接收前端工作流请求，初始化模型客户端，
+    并调用工作流服务返回 SSE 事件流响应。
+    """
+    client = get_client()
+    return run_workflow_stream(request, client)
