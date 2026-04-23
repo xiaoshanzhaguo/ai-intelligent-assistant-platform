@@ -28,7 +28,7 @@ def chat_with_ai(request: ChatRequest, client) -> StreamingResponse:
         full_text = ""
 
         try:
-            # 根据当前助手人设活风格生成系统提示词
+            # 根据当前助手人设或风格生成系统提示词
             system_prompt = build_system_prompt(request.persona)
 
             # 通知前端：当前任务已开始
