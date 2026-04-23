@@ -10,7 +10,7 @@ import streamlit as st
 # 页面基础配置
 # -----------------------------
 st.set_page_config(
-    page_title="AI智能助手平台",
+    page_title="AI 内容分析与创作助手",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -30,7 +30,7 @@ MODE_TO_TASK_TYPE = {
     "结构优化": "rewrite",
     "风格改写": "rewrite",
     "多版本生成": "chat",
-    "工作流分析": "workflow"
+    "工作流优化": "workflow"
 }
 
 AVAILABLE_MODES = list(MODE_TO_TASK_TYPE.keys())
@@ -63,7 +63,7 @@ def build_history_for_api(messaegs: list[dict], max_length: int = MAX_HISTORY_LE
     - content
     """
     history = []
-    recent_messages = messeages[-max_length:]
+    recent_messages = messaegs[-max_length:]
 
     for message in recent_messages:
         role = message.get("role")
@@ -150,7 +150,7 @@ if prompt:
         "task_type": MODE_TO_TASK_TYPE[mode],
         "input_text": prompt,
         "persona": mode,
-        "history": build_history_for_api(st.session_state.messaegs[:-1]),
+        "history": build_history_for_api(st.session_state.messages[:-1]),
         "user_options": {}
     }
 
