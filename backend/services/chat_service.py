@@ -106,5 +106,5 @@ def chat_with_ai(request: ChatRequest, client) -> StreamingResponse:
 
     return StreamingResponse(
         generate(),
-        media_type="text/plain"
+        media_type="text/event-stream",
     )
