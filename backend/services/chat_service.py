@@ -1,41 +1,110 @@
-# 将AI调用抽出来
 from fastapi.responses import StreamingResponse
+
 from backend.prompt.prompt_builder import build_system_prompt
-from backend.schema.chat_schema import ChatRequest
+from backend.schema.chat_schema import ChatRequest, StreamEvent
+from backend.utils.stream_helper import to_sse
 
-# 核心逻辑
-def chat_with_ai(request: ChatRequest, client):
-    # 加try-catch, 让程序员能看到真实错误
-    try:
-        system_prompt = build_system_prompt(request.role)
+# 负责聊天逻辑
+def chat_with_ai(request: ChatRequest, client) -> StreamingResponse:
+    """
+    聊天服务。
 
-        # response = client.chat.completions.create(
-        #     model="deepseek-chat",
-        #     messages=[
-        #         {"role": "system", "content": system_prompt},
-        #         *req.messages
-        #     ]
-        # )
-        #
-        # return {
-        #     "response": response.choices[0].message.content
-        # }
+    将一次 AI 对话请求封装成 SSE 事件流返回给前端，
+    支持开始事件、增量事件、最终事件和错误事件。
+    """
 
-        def generate():
+    def generate():
+        """
+        生成流式事件。
+
+        流程：
+        1. 构造 system_prompt
+        2. 组装消息上下文 (system + history + 当前输入)
+        3. 调用模型流式输出
+        4. 持续发送 delta 事件
+        5. 最终发送 final 事件
+        6. 若发生异常，则发送 error 事件
+        """
+        full_text = ""
+
+        try:
+            # 根据当前助手人设活风格生成系统提示词
+            system_prompt = build_system_prompt(request.persona)
+
+            # 通知前端：当前任务已开始
+            yield to_sse(
+                StreamEvent(
+                    event_type="workflow_start",
+                    session_id=request.session_id,
+                    task_type=request.task_type,
+                    content="聊天任务已开始"
+                )
+            )
+
+            # 组装发送给模型的消息列表
+            messages = [
+                {"role": "system", "content": system_prompt}
+            ]
+
+            # 拼接历史对话上下文
+            if request.history:
+                messages.extend([msg.model_dump() for msg in request.history])
+
+            # 加入当前用户输入
+            messages.append(
+                {"role": "user", "content": request.input_text}
+            )
+
+            # 调用模型接口，开启流式输出
             response = client.chat.completions.create(
                 model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": request.message}
-                ],
+                messages=messages,
                 stream=True
             )
 
+            # 持续读取模型返回的增量内容
             for chunk in response:
-                if chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content  # yield实现一点点吐
+                delta = chunk.choices[0].delta.content
 
-        return StreamingResponse(generate(), media_type="text/plain")  # StreamingResponse告诉前端这是流
-    except Exception as e:
-        print("报错：", str(e))
-        return {"response": "后端出错了"}
+                if not delta:
+                    continue
+
+                full_text += delta
+
+                # 向前端发送增量事件
+                yield to_sse(
+                    StreamEvent(
+                        event_type="delta",
+                        session_id=request.session_id,
+                        task_type=request.task_type,
+                        content=delta
+                    )
+                )
+
+            # 模型输出完成后，发送最终事件
+            yield to_sse(
+                StreamEvent(
+                    event_type="final",
+                    session_id=request.session_id,
+                    task_type=request.task_type,
+                    content=full_text,
+                    is_final=True
+                )
+            )
+
+        except Exception as e:
+            # 发生异常时，也通过事件流返回结构化错误信息
+            yield to_sse(
+                StreamEvent(
+                    event_type="error",
+                    session_id=request.session_id,
+                    task_type=request.task_type,
+                    error_message=str(e),
+                    is_final=True
+                )
+            )
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain"
+    )
