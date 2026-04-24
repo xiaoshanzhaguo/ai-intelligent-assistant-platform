@@ -178,37 +178,61 @@ def build_markdown_content(mode_name: str, result_text: str) -> str:
 def render_copy_button(text: str, button_id_suffix: str) -> None:
     """
     渲染一个复制按钮，用于将结果复制到剪贴板。
+    通过内嵌 HTML + JS 实现浏览器端复制。
     """
     button_id = f"copy_btn_{button_id_suffix}_{uuid4().hex}"
 
     components.html(
         f"""
-        <button id="{button_id}" style="
-            width: 100%;
-            padding: 0.45rem 0.75rem;
-            border-radius: 0.5rem;
-            border: 1px solid #d0d7de;
-            background: white;
-            cursor: pointer;
-            font-size: 0.95rem;
-        ">复制当前结果</button>
+        <html>
+        <head>
+            <style>
+                html, body {{
+                    margin: 0;
+                    padding: 0;
+                    background: transparent;
+                    overflow: hidden;
+                }}
 
-        <script>
-        const btn = document.getElementById("{button_id}");
-        btn.onclick = async () => {{
-            try {{
-                await navigator.clipboard.writeText({json.dumps(text)});
-                const oldText = btn.innerText;
-                btn.innerText = "已复制";
-                setTimeout(() => btn.innerText = oldText, 1500);
-            }} catch (err) {{
-                btn.innerText = "复制失败";
-                setTimeout(() => btn.innerText = "复制当前结果", 1500);
-            }}
-        }};
-        </script>
+                .copy-btn {{
+                    width: 100%;
+                    height: 38px;
+                    border: 1px solid #d0d7de;
+                    border-radius: 0.5rem;
+                    background: white;
+                    color: #111827;
+                    font-size: 0.95rem;
+                    cursor: pointer;
+                    box-sizing: border-box;
+                }}
+
+                .copy-btn:hover {{
+                    background: #f9fafb;
+                }}
+            </style>
+        </head>
+        <body>
+            <button id="{button_id}" class="copy-btn">复制当前结果</button>
+
+            <script>
+                const btn = document.getElementById("{button_id}");
+                btn.onclick = async () => {{
+                    try {{
+                        await navigator.clipboard.writeText({json.dumps(text)});
+                        const oldText = btn.innerText;
+                        btn.innerText = "已复制";
+                        setTimeout(() => btn.innerText = oldText, 1500);
+                    }} catch (err) {{
+                        const oldText = btn.innerText;
+                        btn.innerText = "复制失败";
+                        setTimeout(() => btn.innerText = oldText, 1500);
+                    }}
+                }};
+            </script>
+        </body>
+        </html>
         """,
-        height=45,
+        height=40,
     )
 
 
@@ -220,7 +244,9 @@ def render_copy_button(text: str, button_id_suffix: str) -> None:
 # -----------------------------
 def render_result_actions(result_text: str, mode_name: str, widget_key_suffix: str) -> None:
     """
-    为 assistant 结果渲染操作按钮。
+    为 assistant 结果渲染操作按钮：
+    1. 复制当前结果
+    2. 导出 Markdown
     """
     if not result_text.strip():
         return
@@ -228,7 +254,7 @@ def render_result_actions(result_text: str, mode_name: str, widget_key_suffix: s
     markdown_content = build_markdown_content(mode_name, result_text)
     file_name = build_markdown_filename(mode_name)
 
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns(2, gap="small")
 
     with col1:
         render_copy_button(result_text, widget_key_suffix)
@@ -240,7 +266,7 @@ def render_result_actions(result_text: str, mode_name: str, widget_key_suffix: s
             file_name=file_name,
             mime="text/markdown",
             key=f"download_md_{widget_key_suffix}",
-            use_container_width=True
+            use_container_width=True,
         )
 
 
