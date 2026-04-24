@@ -294,44 +294,40 @@ def render_result_actions(result_text: str, mode_name: str, widget_key_suffix: s
 def render_workflow_step_copy_actions(workflow_blocks: dict[str, str], widget_key_suffix: str) -> None:
     """
     为 workflow 结果渲染“分步复制”按钮。
-    支持单独复制：
-    - 内容总结
-    - 问题分析
-    - 优化建议
+    默认折叠，避免界面过于拥挤。
     """
     if not workflow_blocks:
         return
 
-    st.caption("分步复制")
+    with st.expander("分步复制", expanded=False):
+        col1, col2, col3 = st.columns(3, gap="small")
 
-    col1, col2, col3 = st.columns(3, gap="small")
+        with col1:
+            summary_text = workflow_blocks.get("summary", "").strip()
+            if summary_text:
+                render_copy_button(
+                    text=summary_text,
+                    label="复制总结",
+                    button_id_suffix=f"{widget_key_suffix}_summary"
+                )
 
-    with col1:
-        summary_text = workflow_blocks.get("summary", "").strip()
-        if summary_text:
-            render_copy_button(
-                text=summary_text,
-                label="复制内容总结",
-                button_id_suffix=f"{widget_key_suffix}_summary"
-            )
+        with col2:
+            analysis_text = workflow_blocks.get("analysis", "").strip()
+            if analysis_text:
+                render_copy_button(
+                    text=analysis_text,
+                    label="复制问题",
+                    button_id_suffix=f"{widget_key_suffix}_analysis"
+                )
 
-    with col2:
-        analysis_text = workflow_blocks.get("analysis", "").strip()
-        if analysis_text:
-            render_copy_button(
-                text=analysis_text,
-                label="复制问题分析",
-                button_id_suffix=f"{widget_key_suffix}_analysis"
-            )
-
-    with col3:
-        suggestion_text = workflow_blocks.get("suggestion", "").strip()
-        if suggestion_text:
-            render_copy_button(
-                text=suggestion_text,
-                label="复制优化建议",
-                button_id_suffix=f"{widget_key_suffix}_suggestion"
-            )
+        with col3:
+            suggestion_text = workflow_blocks.get("suggestion", "").strip()
+            if suggestion_text:
+                render_copy_button(
+                    text=suggestion_text,
+                    label="复制建议",
+                    button_id_suffix=f"{widget_key_suffix}_suggestion"
+                )
 
 
 # -----------------------------
@@ -518,6 +514,8 @@ if prompt:
                 )
 
                 if is_workflow and workflow_blocks:
+                    st.markdown("<div style='height: 0.25rem;'></div>", unsafe_allow_html=True)
+
                     render_workflow_step_copy_actions(
                         workflow_blocks=workflow_blocks,
                         widget_key_suffix="latest_steps"
