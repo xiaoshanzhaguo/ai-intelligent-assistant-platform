@@ -34,8 +34,17 @@ MODE_TO_TASK_TYPE = {
     "工作流优化": "workflow"
 }
 
+MODE_DESCRIPTIONS = {
+    "内容分析": "提炼主题、关键信息和结论",
+    "结构优化": "整理表达层次和逻辑结构",
+    "风格改写": "保持原意，调整表达语气",
+    "多版本生成": "生成不同场景可直接使用的版本",
+    "工作流优化": "分步骤总结、分析并提出建议"
+}
+
 AVAILABLE_MODES = list(MODE_TO_TASK_TYPE.keys())
 mode = st.sidebar.selectbox("选择功能", AVAILABLE_MODES)
+st.caption(f"当前模式：{MODE_DESCRIPTIONS[mode]}")
 
 
 # -----------------------------
