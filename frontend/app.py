@@ -131,14 +131,58 @@ for message in current_messages:
 
 
 # -----------------------------
-# 清空聊天按钮
-# 只清空当前模式的上下文
+# 工具函数: 创建所有模式的会话容器
+# 每个模式都维护自己的 session_id 和 messages
 # -----------------------------
-if st.sidebar.button("清空当前模式聊天"):
+def create_mode_sessions(mode_names: list[str]) -> dict:
+    """
+    为所有模式初始化独立会话。
+
+    返回格式:
+    {
+        "内容分析": {
+            "session_id": "...",
+            "messages": []
+        },
+        ...
+    }
+    """
+    return {
+        mode_name: {
+            "session_id": str(uuid4()),
+            "messages": []
+        }
+        for mode_name in mode_names
+    }
+
+
+# -----------------------------
+# Session State 初始化
+# 如果不存在, 或被清空为 {}, 则重新初始化
+# -----------------------------
+if "mode_sessions" not in st.session_state or not st.session_state.mode_sessions:
+    st.session_state.mode_sessions = create_mode_sessions(AVAILABLE_MODES)
+
+
+# -----------------------------
+# 新建当前模式聊天
+# 作用: 重置当前模式会话, 适合开始一轮新的测试或新任务
+# -----------------------------
+if st.sidebar.button("新建当前模式聊天"):
     st.session_state.mode_sessions[mode] = {
         "session_id": str(uuid4()),
         "messages": []
     }
+    st.rerun()
+
+
+# -----------------------------
+# 清空全部聊天
+# 作用: 重置所有模式的会话与消息
+# 不直接赋值为 {}, 而是重新初始化完整结构, 避免后续取值出错
+# -----------------------------
+if st.sidebar.button("清空全部聊天"):
+    st.session_state.mode_sessions = create_mode_sessions(AVAILABLE_MODES)
     st.rerun()
 
 
