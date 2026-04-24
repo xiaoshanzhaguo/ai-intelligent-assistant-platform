@@ -184,10 +184,14 @@ def build_markdown_content(mode_name: str, result_text: str) -> str:
 # 工具函数：渲染复制按钮
 # 通过内嵌 HTML + JS 将结果复制到系统剪贴板
 # -----------------------------
-def render_copy_button(text: str, button_id_suffix: str) -> None:
+def render_copy_button(text: str, label: str, button_id_suffix: str) -> None:
     """
-    渲染一个复制按钮，用于将结果复制到剪贴板。
-    通过内嵌 HTML + JS 实现浏览器端复制。
+    渲染一个复制按钮，用于将指定文本复制到剪贴板。
+
+    :param text: 需要复制的文本内容
+    :param label: 按钮上显示的文字
+    :param button_id_suffix: 用于生成唯一按钮 ID，避免多个按钮冲突
+    :return: None
     """
     button_id = f"copy_btn_{button_id_suffix}_{uuid4().hex}"
 
@@ -221,7 +225,7 @@ def render_copy_button(text: str, button_id_suffix: str) -> None:
             </style>
         </head>
         <body>
-            <button id="{button_id}" class="copy-btn">复制当前结果</button>
+            <button id="{button_id}" class="copy-btn">{label}</button>
 
             <script>
                 const btn = document.getElementById("{button_id}");
@@ -266,7 +270,11 @@ def render_result_actions(result_text: str, mode_name: str, widget_key_suffix: s
     col1, col2 = st.columns(2, gap="small")
 
     with col1:
-        render_copy_button(result_text, widget_key_suffix)
+        render_copy_button(
+            text=result_text,
+            label="复制当前结果",
+            button_id_suffix=widget_key_suffix
+        )
 
     with col2:
         st.download_button(
@@ -277,6 +285,53 @@ def render_result_actions(result_text: str, mode_name: str, widget_key_suffix: s
             key=f"download_md_{widget_key_suffix}",
             use_container_width=True,
         )
+
+
+# -----------------------------
+# 工具函数：渲染 workflow 结果操作区
+# 支持单独复制：内容总结、问题分析、优化建议
+# -----------------------------
+def render_workflow_step_copy_actions(workflow_blocks: dict[str, str], widget_key_suffix: str) -> None:
+    """
+    为 workflow 结果渲染“分步复制”按钮。
+    支持单独复制：
+    - 内容总结
+    - 问题分析
+    - 优化建议
+    """
+    if not workflow_blocks:
+        return
+
+    st.caption("分步复制")
+
+    col1, col2, col3 = st.columns(3, gap="small")
+
+    with col1:
+        summary_text = workflow_blocks.get("summary", "").strip()
+        if summary_text:
+            render_copy_button(
+                text=summary_text,
+                label="复制内容总结",
+                button_id_suffix=f"{widget_key_suffix}_summary"
+            )
+
+    with col2:
+        analysis_text = workflow_blocks.get("analysis", "").strip()
+        if analysis_text:
+            render_copy_button(
+                text=analysis_text,
+                label="复制问题分析",
+                button_id_suffix=f"{widget_key_suffix}_analysis"
+            )
+
+    with col3:
+        suggestion_text = workflow_blocks.get("suggestion", "").strip()
+        if suggestion_text:
+            render_copy_button(
+                text=suggestion_text,
+                label="复制优化建议",
+                button_id_suffix=f"{widget_key_suffix}_suggestion"
+            )
 
 
 # -----------------------------
@@ -291,11 +346,19 @@ for idx, message in enumerate(current_messages):
         st.markdown(message["content"])
 
         if message["role"] == "assistant":
+            # 整体结果操作：复制整段结果 + 导出 Markdown
             render_result_actions(
                 result_text=message["content"],
                 mode_name=mode,
                 widget_key_suffix=f"history_{idx}"
             )
+
+            # 如果是 workflow 结果，并且保留了分步结构，则额外支持分步复制
+            if mode == "工作流优化" and message.get("workflow_blocks"):
+                render_workflow_step_copy_actions(
+                    workflow_blocks=message["workflow_blocks"],
+                    widget_key_suffix=f"history_steps_{idx}"
+                )
 
 
 # -----------------------------
@@ -443,7 +506,10 @@ if prompt:
                 final_display_text = full_response
 
             # 8. 当前轮结果操作区
-            # 在新结果刚生成时，立即支持复制和 Markdown 导出
+            # 在新结果刚生成时，立即支持：
+            # 1. 整体复制
+            # 2. Markdown 导出
+            # 3. workflow 分步复制
             if final_display_text.strip():
                 render_result_actions(
                     result_text=final_display_text,
@@ -451,9 +517,22 @@ if prompt:
                     widget_key_suffix="latest_result"
                 )
 
+                if is_workflow and workflow_blocks:
+                    render_workflow_step_copy_actions(
+                        workflow_blocks=workflow_blocks,
+                        widget_key_suffix="latest_steps"
+                    )
+
             # 9. 防止空内容写入历史
             if final_display_text.strip():
-                current_messages.append({
+                assistant_message = {
                     "role": "assistant",
                     "content": final_display_text
-                })
+                }
+
+                # workflow 模式下，把分步结果一并保存到消息里
+                # 这样历史消息也能继续支持“分步复制”
+                if is_workflow and workflow_blocks:
+                    assistant_message["workflow_blocks"] = workflow_blocks.copy()
+
+                current_messages.append(assistant_message)
