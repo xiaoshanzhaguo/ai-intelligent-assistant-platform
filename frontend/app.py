@@ -40,12 +40,24 @@ mode = st.sidebar.selectbox("选择功能", AVAILABLE_MODES)
 
 # -----------------------------
 # Session State 初始化
+# 改为“按模式隔离上下文”
+# 每个模式各自维护：
+# - session_id
+# - messages
 # -----------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+if "mode_sessions" not in st.session_state:
+    st.session_state.mode_sessions = {
+        mode_name: {
+            "session_id": str(uuid4()),
+            "messages": []
+        }
+        for mode_name in AVAILABLE_MODES
+    }
 
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid4())
+# 当前模式对应的会话状态
+current_session = st.session_state.mode_sessions[mode]
+current_session_id = current_session["session_id"]
+current_messages = current_session["messages"]
 
 
 # -----------------------------
@@ -54,16 +66,17 @@ if "session_id" not in st.session_state:
 # -----------------------------
 MAX_HISTORY_LENGTH = 6
 
-def build_history_for_api(messaegs: list[dict], max_length: int = MAX_HISTORY_LENGTH) -> list[dict]:
+
+def build_history_for_api(messages: list[dict], max_length: int = MAX_HISTORY_LENGTH) -> list[dict]:
     """
-    将前端消息列表剪裁并转换为后端可直接接收的 history 结构。
+    将前端消息列表裁剪并转换为后端可直接接收的 history 结构。
 
     每条消息保留：
     - role
     - content
     """
     history = []
-    recent_messages = messaegs[-max_length:]
+    recent_messages = messages[-max_length:]
 
     for message in recent_messages:
         role = message.get("role")
@@ -73,7 +86,8 @@ def build_history_for_api(messaegs: list[dict], max_length: int = MAX_HISTORY_LE
             continue
 
         history.append({
-            "role": role, "content": content
+            "role": role,
+            "content": content
         })
 
     return history
@@ -108,20 +122,23 @@ def format_workflow_blocks(workflow_blocks: dict[str, str]) -> str:
 
 
 # -----------------------------
-# 展示历史消息
+# 展示当前模式的历史消息
 # assistant 消息支持 markdown，便于工作流分段展示
 # -----------------------------
-for message in st.session_state.messages:
+for message in current_messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 
 # -----------------------------
 # 清空聊天按钮
+# 只清空当前模式的上下文
 # -----------------------------
-if st.sidebar.button("清空聊天"):
-    st.session_state.messages = []
-    st.session_state.session_id = str(uuid4())
+if st.sidebar.button("清空当前模式聊天"):
+    st.session_state.mode_sessions[mode] = {
+        "session_id": str(uuid4()),
+        "messages": []
+    }
     st.rerun()
 
 
@@ -131,11 +148,11 @@ if st.sidebar.button("清空聊天"):
 prompt = st.chat_input("请输入您要处理的内容...")
 
 if prompt:
-    # 1. 先展示并保存用户输入
+    # 1. 先展示并保存用户输入（仅写入当前模式）
     with st.chat_message("user"):
         st.write(prompt)
 
-    st.session_state.messages.append({
+    current_messages.append({
         "role": "user",
         "content": prompt
     })
@@ -146,11 +163,11 @@ if prompt:
 
     # 3. 构造符合 ChatRequest 的请求体
     payload = {
-        "session_id": st.session_state.session_id,
+        "session_id": current_session_id,
         "task_type": MODE_TO_TASK_TYPE[mode],
         "input_text": prompt,
         "persona": mode,
-        "history": build_history_for_api(st.session_state.messages[:-1]),
+        "history": build_history_for_api(current_messages[:-1]),
         "user_options": {}
     }
 
@@ -176,7 +193,7 @@ if prompt:
             # 用于工作流模式的分步骤结果
             workflow_blocks: dict[str, str] = {}
 
-            # 标记是否收到第一条有效事件，用来清理”思考中“
+            # 标记是否收到第一条有效事件，用来清理“思考中”
             first_event_received = False
 
             # 6. 逐行解析 SSE 事件流
@@ -186,7 +203,7 @@ if prompt:
 
                 raw_text = raw_line.decode("utf-8").strip()
 
-                # SSE 标准格式: data: {...}
+                # SSE 标准格式：data: {...}
                 if not raw_text.startswith("data: "):
                     continue
 
@@ -206,14 +223,14 @@ if prompt:
                     placeholder.empty()
                     first_event_received = True
 
-                # 工作流开始 / 步骤开始: 可选择显示状态, 不强制写入最终结果
+                # 工作流开始 / 步骤开始：可选择显示状态，不强制写入最终结果
                 if event_type in {"workflow_start", "step_start"}:
                     if is_workflow and step_name:
                         current_markdown = format_workflow_blocks(workflow_blocks)
                         if current_markdown:
                             placeholder.markdown(current_markdown)
 
-                # 增量事件: 按模式分别处理
+                # 增量事件：按模式分别处理
                 elif event_type == "delta":
                     if is_workflow:
                         if step_name:
@@ -226,7 +243,7 @@ if prompt:
                         placeholder.markdown(full_response + "▌")
                         time.sleep(0.01)
 
-                # 步骤完成事件: 用于工作流模式的最终分步内容落盘
+                # 步骤完成事件：用于工作流模式的最终分步内容落盘
                 elif event_type == "step_complete":
                     if step_name:
                         workflow_blocks[step_name] = content
@@ -237,7 +254,8 @@ if prompt:
                     if is_workflow:
                         placeholder.markdown(format_workflow_blocks(workflow_blocks))
                     else:
-                        # 聊天模式下, final.content 可能是完整文本; 如果前面 delta 已完整累计, 则无需重复追加
+                        # 聊天模式下，final.content 可能是完整文本；
+                        # 如果前面 delta 已完整累计，则无需重复追加
                         if not full_response and content:
                             full_response = content
                         placeholder.markdown(full_response)
@@ -247,7 +265,7 @@ if prompt:
                     st.error(error_message or "请求失败")
                     break
 
-            # 7. 生成最终写入聊天记录的 assistant 内容
+            # 7. 生成最终写入聊天记录的 assistant 内容（仅写入当前模式）
             if is_workflow:
                 final_display_text = format_workflow_blocks(workflow_blocks)
             else:
@@ -255,7 +273,7 @@ if prompt:
 
             # 防止空内容写入历史
             if final_display_text.strip():
-                st.session_state.messages.append({
+                current_messages.append({
                     "role": "assistant",
                     "content": final_display_text
                 })
