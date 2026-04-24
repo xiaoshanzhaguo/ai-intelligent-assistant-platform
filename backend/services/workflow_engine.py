@@ -6,6 +6,7 @@ from backend.prompt.prompt_builder import build_system_prompt
 from backend.schema.chat_schema import ChatRequest, StreamEvent
 from backend.utils.stream_helper import to_sse
 
+
 def run_workflow_stream(request: ChatRequest, client) -> StreamingResponse:
     """
     工作流流式服务。
@@ -50,11 +51,30 @@ def run_workflow_stream(request: ChatRequest, client) -> StreamingResponse:
                 },
                 {
                     "name": "analysis",
-                    "prompt": f"请分析以下内容存在的问题与不足：\n{request.input_text}"
+                    "prompt": f"""
+                        请仅分析以下内容中已经明确出现的问题或不足。
+                        要求：
+                        1. 不补充输入中未明确出现的新问题。
+                        2. 不给建议。
+                        3. 输出简洁、结构化。
+                        
+                        内容如下：
+                        {request.input_text}
+                    """.strip()
                 },
                 {
                     "name": "suggestion",
-                    "prompt": f"请针对以下内容给出具体优化建议：\n{request.input_text}"
+                    "prompt": f"""
+                        请仅基于以下内容中已经明确出现的问题，给出 3 条最值得优先执行的优化建议。
+                        要求：
+                        1. 只给建议，不重复总结和问题分析。
+                        2. 每条建议必须直接对应输入中已出现的问题。
+                        3. 不补充新技术、新框架、新工具、新平台、新指标。
+                        4. 输出简洁、可执行、按重要性排序。
+                        
+                        内容如下：
+                        {request.input_text}
+                    """.strip()
                 }
             ]
 
