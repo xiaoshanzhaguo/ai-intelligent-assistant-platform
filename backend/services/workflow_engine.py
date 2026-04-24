@@ -53,11 +53,12 @@ def run_workflow_stream(request: ChatRequest, client) -> StreamingResponse:
                     "name": "analysis",
                     "prompt": f"""
                         请仅分析以下内容中已经明确出现的问题或不足。
+        
                         要求：
-                        1. 不补充输入中未明确出现的新问题。
-                        2. 不给建议。
-                        3. 输出简洁、结构化。
-                        
+                        1. 只分析输入中已明确出现的问题，不补充新问题。
+                        2. 不给建议，不给方案，不补充新背景。
+                        3. 输出简洁、结构化、逐条列出。
+        
                         内容如下：
                         {request.input_text}
                     """.strip()
@@ -66,12 +67,14 @@ def run_workflow_stream(request: ChatRequest, client) -> StreamingResponse:
                     "name": "suggestion",
                     "prompt": f"""
                         请仅基于以下内容中已经明确出现的问题，给出 3 条最值得优先执行的优化建议。
+        
                         要求：
                         1. 只给建议，不重复总结和问题分析。
                         2. 每条建议必须直接对应输入中已出现的问题。
                         3. 不补充新技术、新框架、新工具、新平台、新指标。
-                        4. 输出简洁、可执行、按重要性排序。
-                        
+                        4. 不要给通用行业方案，只给和输入内容直接相关的建议。
+                        5. 输出简洁、按重要性排序。
+        
                         内容如下：
                         {request.input_text}
                     """.strip()
