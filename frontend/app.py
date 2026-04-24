@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 # -----------------------------
@@ -34,25 +35,41 @@ MODE_TO_TASK_TYPE = {
 }
 
 AVAILABLE_MODES = list(MODE_TO_TASK_TYPE.keys())
-
 mode = st.sidebar.selectbox("选择功能", AVAILABLE_MODES)
 
 
 # -----------------------------
-# Session State 初始化
-# 改为“按模式隔离上下文”
-# 每个模式各自维护：
-# - session_id
-# - messages
+# 工具函数：创建所有模式的会话容器
+# 每个模式都维护自己的 session_id 和 messages
 # -----------------------------
-if "mode_sessions" not in st.session_state:
-    st.session_state.mode_sessions = {
+def create_mode_sessions(mode_names: list[str]) -> dict:
+    """
+    为所有模式初始化独立会话。
+
+    返回格式：
+    {
+        "内容分析": {
+            "session_id": "...",
+            "messages": []
+        },
+        ...
+    }
+    """
+    return {
         mode_name: {
             "session_id": str(uuid4()),
             "messages": []
         }
-        for mode_name in AVAILABLE_MODES
+        for mode_name in mode_names
     }
+
+
+# -----------------------------
+# Session State 初始化
+# 如果不存在，或被清空为 {}，则重新初始化
+# -----------------------------
+if "mode_sessions" not in st.session_state or not st.session_state.mode_sessions:
+    st.session_state.mode_sessions = create_mode_sessions(AVAILABLE_MODES)
 
 # 当前模式对应的会话状态
 current_session = st.session_state.mode_sessions[mode]
@@ -122,51 +139,132 @@ def format_workflow_blocks(workflow_blocks: dict[str, str]) -> str:
 
 
 # -----------------------------
+# 工具函数：生成 Markdown 文件名
+# mode_name 用于区分不同模式导出的结果
+# -----------------------------
+def build_markdown_filename(mode_name: str) -> str:
+    """
+    生成 Markdown 导出文件名。
+    """
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    safe_mode_name = mode_name.replace(" ", "_")
+    return f"{safe_mode_name}_result_{timestamp}.md"
+
+
+# -----------------------------
+# 工具函数：构造 Markdown 导出内容
+# 为导出的文件增加标题和模式信息
+# -----------------------------
+def build_markdown_content(mode_name: str, result_text: str) -> str:
+    """
+    将结果包装成更完整的 Markdown 文本，便于导出保存。
+    """
+    export_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    return f"""# AI 内容分析与创作助手导出结果
+
+- 模式：{mode_name}
+- 导出时间：{export_time}
+
+---
+
+{result_text}
+"""
+
+
+# -----------------------------
+# 工具函数：渲染复制按钮
+# 通过内嵌 HTML + JS 将结果复制到系统剪贴板
+# -----------------------------
+def render_copy_button(text: str, button_id_suffix: str) -> None:
+    """
+    渲染一个复制按钮，用于将结果复制到剪贴板。
+    """
+    button_id = f"copy_btn_{button_id_suffix}_{uuid4().hex}"
+
+    components.html(
+        f"""
+        <button id="{button_id}" style="
+            width: 100%;
+            padding: 0.45rem 0.75rem;
+            border-radius: 0.5rem;
+            border: 1px solid #d0d7de;
+            background: white;
+            cursor: pointer;
+            font-size: 0.95rem;
+        ">复制当前结果</button>
+
+        <script>
+        const btn = document.getElementById("{button_id}");
+        btn.onclick = async () => {{
+            try {{
+                await navigator.clipboard.writeText({json.dumps(text)});
+                const oldText = btn.innerText;
+                btn.innerText = "已复制";
+                setTimeout(() => btn.innerText = oldText, 1500);
+            }} catch (err) {{
+                btn.innerText = "复制失败";
+                setTimeout(() => btn.innerText = "复制当前结果", 1500);
+            }}
+        }};
+        </script>
+        """,
+        height=45,
+    )
+
+
+# -----------------------------
+# 工具函数：渲染结果操作区
+# 包括：
+# 1. 复制当前结果
+# 2. 导出 Markdown
+# -----------------------------
+def render_result_actions(result_text: str, mode_name: str, widget_key_suffix: str) -> None:
+    """
+    为 assistant 结果渲染操作按钮。
+    """
+    if not result_text.strip():
+        return
+
+    markdown_content = build_markdown_content(mode_name, result_text)
+    file_name = build_markdown_filename(mode_name)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        render_copy_button(result_text, widget_key_suffix)
+
+    with col2:
+        st.download_button(
+            label="导出 Markdown",
+            data=markdown_content,
+            file_name=file_name,
+            mime="text/markdown",
+            key=f"download_md_{widget_key_suffix}",
+            use_container_width=True
+        )
+
+
+# -----------------------------
 # 展示当前模式的历史消息
 # assistant 消息支持 markdown，便于工作流分段展示
+# 并为 assistant 消息补充：
+# - 复制当前结果
+# - 导出 Markdown
 # -----------------------------
-for message in current_messages:
+for idx, message in enumerate(current_messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-
-# -----------------------------
-# 工具函数: 创建所有模式的会话容器
-# 每个模式都维护自己的 session_id 和 messages
-# -----------------------------
-def create_mode_sessions(mode_names: list[str]) -> dict:
-    """
-    为所有模式初始化独立会话。
-
-    返回格式:
-    {
-        "内容分析": {
-            "session_id": "...",
-            "messages": []
-        },
-        ...
-    }
-    """
-    return {
-        mode_name: {
-            "session_id": str(uuid4()),
-            "messages": []
-        }
-        for mode_name in mode_names
-    }
+        if message["role"] == "assistant":
+            render_result_actions(
+                result_text=message["content"],
+                mode_name=mode,
+                widget_key_suffix=f"history_{idx}"
+            )
 
 
 # -----------------------------
-# Session State 初始化
-# 如果不存在, 或被清空为 {}, 则重新初始化
-# -----------------------------
-if "mode_sessions" not in st.session_state or not st.session_state.mode_sessions:
-    st.session_state.mode_sessions = create_mode_sessions(AVAILABLE_MODES)
-
-
-# -----------------------------
-# 新建当前模式聊天
-# 作用: 重置当前模式会话, 适合开始一轮新的测试或新任务
+# 会话控制按钮
 # -----------------------------
 if st.sidebar.button("新建当前模式聊天"):
     st.session_state.mode_sessions[mode] = {
@@ -175,12 +273,6 @@ if st.sidebar.button("新建当前模式聊天"):
     }
     st.rerun()
 
-
-# -----------------------------
-# 清空全部聊天
-# 作用: 重置所有模式的会话与消息
-# 不直接赋值为 {}, 而是重新初始化完整结构, 避免后续取值出错
-# -----------------------------
 if st.sidebar.button("清空全部聊天"):
     st.session_state.mode_sessions = create_mode_sessions(AVAILABLE_MODES)
     st.rerun()
@@ -315,7 +407,16 @@ if prompt:
             else:
                 final_display_text = full_response
 
-            # 防止空内容写入历史
+            # 8. 当前轮结果操作区
+            # 在新结果刚生成时，立即支持复制和 Markdown 导出
+            if final_display_text.strip():
+                render_result_actions(
+                    result_text=final_display_text,
+                    mode_name=mode,
+                    widget_key_suffix="latest_result"
+                )
+
+            # 9. 防止空内容写入历史
             if final_display_text.strip():
                 current_messages.append({
                     "role": "assistant",
