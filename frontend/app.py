@@ -1,10 +1,18 @@
 import json
 import time
+from _pyrepl import reader
+from io import BytesIO
 from uuid import uuid4
 
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+
+
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
 
 
 # -----------------------------
@@ -45,6 +53,18 @@ MODE_DESCRIPTIONS = {
 AVAILABLE_MODES = list(MODE_TO_TASK_TYPE.keys())
 mode = st.sidebar.selectbox("选择功能", AVAILABLE_MODES)
 st.caption(f"当前模式：{MODE_DESCRIPTIONS[mode]}")
+
+
+# -----------------------------
+# 支持文件上传分析的模式
+# 多版本生成暂不启用文件上传
+# -----------------------------
+UPLOAD_ENABLED_MODES = {
+    "内容分析",
+    "结构优化",
+    "风格改写",
+    "工作流优化"
+}
 
 
 # -----------------------------
@@ -100,13 +120,16 @@ def build_history_for_api(messages: list[dict], max_length: int = MAX_HISTORY_LE
     每条消息保留：
     - role
     - content
+    说明:
+    - 普通文本输入直接使用 content
+    - 文件上传消息优先使用 raw_content, 保证历史上下文仍热是完整文本
     """
     history = []
     recent_messages = messages[-max_length:]
 
     for message in recent_messages:
         role = message.get("role")
-        content = message.get("content", "")
+        content = message.get("raw_content", message.get("content", ""))
 
         if role not in {"user", "assistant", "system"}:
             continue
@@ -145,6 +168,56 @@ def format_workflow_blocks(workflow_blocks: dict[str, str]) -> str:
         formatted_parts.append(f"### {title}\n\n{content}\n")
 
     return "\n\n".join(formatted_parts)
+
+
+# -----------------------------
+# 工具函数：从上传文件中提取文本
+# 支持 txt / md / pdf
+# -----------------------------
+def extract_text_from_uploaded_file(uploaded_file) -> tuple[str | None, str | None]:
+    """
+    从上传文件中提取文本。
+
+    返回:
+    - (text, None) 表示成功
+    - (None, error_message) 表示失败
+    """
+    file_name = uploaded_file.name.lower()
+    file_bytes = uploaded_file.getvalue()
+
+    # 处理 txt / md
+    if file_name.endswith(".txt") or file_name.endswith(".md"):
+        for encoding in ("utf-8", "utf-8-sig", "gbk"):
+            try:
+                return file_bytes.decode(encoding), None
+            except UnicodeDecodeError:
+                continue
+        return None, "文件编码无法识别, 请尝试使用 UTF-8 编码保存后再上传。"
+
+    # 处理pdf
+    if file_name.endswith(".pdf"):
+        if PdfReader is None:
+            return None, "当前环境未安装 pypdf, 请先在 requirements.txt 中添加 pypdf 并安装依赖。"
+
+        try:
+            reader = PdfReader(BytesIO(file_bytes))
+            page_texts = []
+
+            for page in reader.pages:
+                text = page.extract_text() or ""
+                if text.strip():
+                    page_texts.append(text)
+
+            full_text = "\n\n".join(page_texts).strip()
+
+            if not full_text:
+                return None, "PDF 中未提取到可用文本。若这是扫描版 PDF, 后续需要 OCR 才能支持。"
+
+            return full_text, None
+        except Exception as e:
+            return None, f"PDF 解析失败: {str(e)}"
+
+    return None, "暂不支持该文件类型, 请上传 txt、md 或 pdf 文件。"
 
 
 # -----------------------------
@@ -373,18 +446,82 @@ if st.sidebar.button("清空全部聊天"):
 
 
 # -----------------------------
+# 文件上传分析区
+# 仅在指定模式下启用
+# -----------------------------
+uploaded_file = None
+uploaded_file_text = None
+uploaded_file_error = None
+use_uploaded_file = False
+
+if mode in UPLOAD_ENABLED_MODES:
+    st.markdown("### 文件上传分析")
+    uploaded_file = st.file_uploader(
+        "上传 TXT / Markdown / PDF 文件",
+        type=["txt", "md", "pdf"],
+        key=f"file_uploader_{mode}"
+    )
+
+    if uploaded_file is not None:
+        uploaded_file_text, uploaded_file_error = extract_text_from_uploaded_file(uploaded_file)
+
+        if uploaded_file_error:
+            st.error(uploaded_file_error)
+        elif uploaded_file_text:
+            st.caption(f"已读取文件：{uploaded_file.name}（约 {len(uploaded_file_text)} 字）")
+
+            preview_limit = 1200
+            preview_text = uploaded_file_text[:preview_limit]
+            if len(uploaded_file_text) > preview_limit:
+                preview_text += "\n\n...[预览已截断，实际处理会使用完整文本]"
+
+            st.text_area(
+                "文件内容预览",
+                value=preview_text,
+                height=180,
+                disabled=True,
+                key=f"file_preview_{mode}"
+            )
+
+            use_uploaded_file = st.button(
+                "使用上传文件开始处理",
+                key=f"process_uploaded_file_{mode}",
+                use_container_width=True
+            )
+else:
+    st.caption("当前模式暂不支持文件上传分析。")
+
+
+## -----------------------------
 # 输入框
+# 支持两种输入来源：
+# 1. 手动输入
+# 2. 上传文件后直接处理
 # -----------------------------
 prompt = st.chat_input("请输入您要处理的内容...")
 
+submit_display_text = None   # 用于前端展示的文本
+submit_raw_text = None       # 真正发送给后端的完整文本
+
+# 优先处理手动输入
 if prompt:
+    submit_display_text = prompt
+    submit_raw_text = prompt
+
+# 如果没有手动输入，则判断是否点击了“使用上传文件开始处理”
+elif use_uploaded_file and uploaded_file is not None and uploaded_file_text:
+    submit_display_text = f"【上传文件】{uploaded_file.name}"
+    submit_raw_text = uploaded_file_text
+
+if submit_raw_text:
     # 1. 先展示并保存用户输入（仅写入当前模式）
     with st.chat_message("user"):
-        st.write(prompt)
+        st.write(submit_display_text)
 
     current_messages.append({
         "role": "user",
-        "content": prompt
+        "content": submit_display_text,
+        "raw_content": submit_raw_text
     })
 
     # 2. 根据模式决定调用哪个接口
@@ -395,7 +532,7 @@ if prompt:
     payload = {
         "session_id": current_session_id,
         "task_type": MODE_TO_TASK_TYPE[mode],
-        "input_text": prompt,
+        "input_text": submit_raw_text,
         "persona": mode,
         "history": build_history_for_api(current_messages[:-1]),
         "user_options": {}
