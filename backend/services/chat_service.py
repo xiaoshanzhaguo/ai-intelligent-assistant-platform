@@ -1,5 +1,6 @@
 from fastapi.responses import StreamingResponse
 
+from backend.rag.service import build_rag_context
 from backend.prompt.prompt_builder import build_system_prompt
 from backend.schema.chat_schema import ChatRequest, StreamEvent
 from backend.utils.stream_helper import to_sse
@@ -41,10 +42,30 @@ def chat_with_ai(request: ChatRequest, client) -> StreamingResponse:
                 )
             )
 
+            # 根据当前请求决定是否启用 RAG
+            rag_context = ""
+            if request.use_rag:
+                rag_context = build_rag_context(
+                    session_id=request.session_id,
+                    query=request.input_text,
+                    top_k=request.rag_top_k
+                )
+
             # 组装发送给模型的消息列表
             messages = [
                 {"role": "system", "content": system_prompt}
             ]
+
+            # 如果启用了 RAG，则把检索到的参考内容作为额外 system 上下文加入
+            if rag_context:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "以下是与当前任务相关的参考内容，请优先基于这些内容回答。"
+                        "如果参考内容不足，再结合一般知识进行补充，但不要虚构文档中没有的信息。\n\n"
+                        f"{rag_context}"
+                    )
+                })
 
             # 拼接历史对话上下文
             if request.history:
