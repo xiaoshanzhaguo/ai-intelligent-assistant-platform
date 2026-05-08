@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 from backend.prompt.prompt_builder import build_system_prompt
 from backend.schema.chat_schema import ChatRequest, StreamEvent
 from backend.utils.stream_helper import to_sse
+from backend.rag.service import build_rag_context
 
 
 def run_workflow_stream(request: ChatRequest, client) -> StreamingResponse:
@@ -97,8 +98,31 @@ def run_workflow_stream(request: ChatRequest, client) -> StreamingResponse:
                     )
                 )
 
+                # 当前步骤是否启用 RAG
+                rag_context = ""
+                if request.use_rag:
+                    # 使用“步骤名称 + 用户输入”作为检索 query
+                    # 让 summary / analysis / suggestion 各自更贴近当前步骤要求
+                    step_query = f"{step_name} {request.input_text}"
+                    rag_context = build_rag_context(
+                        session_id=request.session_id,
+                        query=step_query,
+                        top_k=request.rag_top_k
+                    )
+
                 # 组装本步骤的消息上下文
                 messages = [{"role": "system", "content": system_prompt}]
+
+                # 如果启用了 RAG，则加入和当前步骤相关的参考内容
+                if rag_context:
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "以下是与当前步骤相关的参考内容，请优先基于这些内容输出。"
+                            "如果参考内容不足，不要编造文档中没有的信息。\n\n"
+                            f"{rag_context}"
+                        )
+                    })
 
                 # 如果存在历史消息，则拼接到上下文中
                 if request.history:
