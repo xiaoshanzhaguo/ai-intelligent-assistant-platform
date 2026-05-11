@@ -1,7 +1,6 @@
 import json
 import time
 import hashlib
-from _pyrepl import reader
 from io import BytesIO
 from uuid import uuid4
 
@@ -61,12 +60,12 @@ st.caption(f"当前模式：{MODE_DESCRIPTIONS[mode]}")
 # -----------------------------
 RAG_ENABLED_MODES = {
     "内容分析",
-    "工作流分析"
+    "工作流优化"
 }
 
 DEFAULT_FILE_MODE_PROMPTS = {
     "内容分析": "请基于上传文档完成内容分析，提炼主题、关键信息和结论。",
-    "工作流分析": "请基于上传文档进行工作流优化，分步骤总结、分析并提出建议。"
+    "工作流优化": "请基于上传文档进行工作流优化，分步骤总结、分析并提出建议。"
 }
 
 
@@ -491,6 +490,14 @@ if st.sidebar.button("新建当前模式聊天"):
 if st.sidebar.button("清空全部聊天"):
     st.session_state.mode_sessions = create_mode_sessions(AVAILABLE_MODES)
     st.rerun()
+
+
+# -----------------------------
+# RAG 控件默认值
+# 即使当前没有上传文件，也保证变量可安全使用
+# -----------------------------
+use_rag = False
+rag_top_k = 3
 
 
 # -----------------------------
