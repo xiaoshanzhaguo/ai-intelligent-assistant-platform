@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 from backend.llm.client import get_client
 from backend.rag.chunker import split_text_into_chunks
 from backend.rag.store import save_document_chunks
+from backend.rag.store import clear_document_chunks
 from backend.schema.chat_schema import (
     ChatRequest,
     IndexDocumentRequest,
@@ -68,3 +69,16 @@ def index_document(request: IndexDocumentRequest):
         file_name=request.file_name,
         chunk_count=len(chunks)
     )
+
+
+@router.delete("/clear_document/{session_id}")
+def clear_document(session_id: str):
+    """
+    清理某个 session 对应的临时 RAG 文档索引
+
+    作用：
+    1. 当前端新建会话或清空聊天时，主动释放 session 的文本块
+    2. 避免第一阶段 RAG 的内存存储无限累积
+    """
+    clear_document_chunks(session_id)
+    return {"message": f"session {session_id} 的文档索引已清理"}
