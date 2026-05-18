@@ -68,6 +68,8 @@ DEFAULT_FILE_MODE_PROMPTS = {
     "工作流优化": "请基于上传文档进行工作流优化，分步骤总结、分析并提出建议。"
 }
 
+CHAT_INPUT_FILE_TYPES = ["txt", "md", "pdf"]
+
 
 # -----------------------------
 # 支持文件上传分析的模式
@@ -451,6 +453,46 @@ def index_uploaded_document(session_id: str, file_name: str, document_text: str)
     return True, f"文档索引完成，共切分 {result['chunk_count']} 个文本块。"
 
 
+def build_user_display_text(user_text: str, uploaded_file_name: str | None) -> str:
+    """
+    构造聊天区展示给用户看的输入文本。
+
+    说明:
+    - 如果用户既输入了问题，又附加了文件，则两者都显示
+    - 如果用户只附加文件，则显示附件名称
+    """
+    parts = []
+
+    if user_text.strip():
+        parts.append(user_text.strip())
+
+    if uploaded_file_name:
+        parts.append(f"【附件】 {uploaded_file_name}")
+
+    return "\n\n".join(parts).strip() or " 【仅上传附件】"
+
+
+def build_non_rag_input_text(user_text: str, uploaded_file_name: str) -> str:
+    """
+    构造“不启用 RAG“时真正发给后端的 input_text。
+
+    说明：
+    - 如果只有文件，没有额外问题，则直接把全文作为输入
+    - 如果用户还补充了问题或要求，则把“文件全文 + 用户要求”一起发给后端
+    """
+    clean_user_text = user_text.strip()
+
+    if clean_user_text:
+        return (
+            "以下是用户上传的文档内容：\n\n"
+            f"{uploaded_file_text}\n\n"
+            "用户的处理要求如下: \n"
+            f"{clean_user_text}"
+        )
+
+    return uploaded_file_text
+
+
 def clear_indexed_document(session_id: str) -> None:
     """
     调用后端清理接口，删除某个 session 对应的临时文档索引。
@@ -531,135 +573,130 @@ if st.sidebar.button("清空全部聊天"):
 
 
 # -----------------------------
-# RAG 控件默认值
-# 即使当前没有上传文件，也保证变量可安全使用
+# RAG 控件区
+# 说明：
+# - 只在第一阶段允许的模式中展示
+# - 即使当前没附加文件，也先给默认值，保证后续 payload 安全
 # -----------------------------
 use_rag = False
 rag_top_k = 3
 
 
-# -----------------------------
-# 文件上传分析区
-# 仅在指定模式下启用
-# -----------------------------
-uploaded_file = None
-uploaded_file_text = None
-uploaded_file_error = None
-use_uploaded_file = False
-
-if mode in UPLOAD_ENABLED_MODES:
-    st.markdown("### 文件上传分析")
-    uploaded_file = st.file_uploader(
-        "上传 TXT / Markdown / PDF 文件",
-        type=["txt", "md", "pdf"],
-        key=f"file_uploader_{mode}"
+if mode in RAG_ENABLED_MODES:
+    use_rag = st.checkbox(
+        "启用文档检索增强（RAG）",
+        value=True,
+        key=f"use_rag_{mode}"
     )
 
+    if use_rag:
+        rag_top_k = st.slider(
+            "检索片段数量",
+            min_value=1,
+            max_value=5,
+            value=3,
+            key=f"rag_top_k_{mode}"
+        )
+
+        st.caption("在附加文档时，系统会先检索相关片段，再交给模型处理。")
+
+        current_index_state = st.session_state.rag_index_state.get(mode)
+        if current_index_state and current_index_state.get("session_id") == current_session_id:
+            file_name = current_index_state.get("file_name", "未命名文件")
+            st.caption(f"当前会话已索引文档: {file_name}")
+
+
+# -----------------------------
+# 统一输入入口
+# 使用 st.chat_input 同时支持:
+# 1. 纯文本输入
+# 2. 文本 + 文件附件
+# 3. 仅上传文件
+# -----------------------------
+chat_submission = st.chat_input(
+    "请输入内容，或直接附加文件后发送...",
+    accept_file=(mode in RAG_ENABLED_MODES),
+    file_type=CHAT_INPUT_FILE_TYPES if mode in UPLOAD_ENABLED_MODES else None,
+    key=f"chat_input_{mode}"
+)
+
+submit_display_text = None   # 用于聊天区展示
+submit_raw_text = None       # 真正发送给后端的 input_text
+uploaded_file_name = None
+uploaded_file_text = None
+
+if chat_submission:
+    # -----------------------------
+    # 第一步：统一解析 chat_input 返回值
+    # 说明：
+    # - accept_file=True 时，chat_input 返回 dict-like 对象
+    # - 包含 text 和 files
+    # - 非上传模式下，仍然是普通字符串
+    # -----------------------------
+    if mode in UPLOAD_ENABLED_MODES:
+        user_text = (chat_submission.text or "").strip()
+        uploaded_files = chat_submission["files"]
+    else:
+        user_text = str(chat_submission).strip()
+        uploaded_files = []
+
+    uploaded_file = uploaded_files[0] if uploaded_files else None
+
+    # -----------------------------
+    # 第二步：如果附加了文件，先提取文本
+    # -----------------------------
     if uploaded_file is not None:
-        uploaded_file_text, uploaded_file_error = extract_text_from_uploaded_file(uploaded_file)
+        uploaded_file_name = uploaded_file.name
+        uploaded_file_text, uploded_file_error = extract_text_from_uploaded_file(uploaded_file)
 
         if uploaded_file_error:
             st.error(uploaded_file_error)
-        elif uploaded_file_text:
-            st.caption(f"已读取文件：{uploaded_file.name}（约 {len(uploaded_file_text)} 字）")
+            st.stop()
 
-            use_rag = False
-            rag_top_k = 3
+    # 如果用户既没输入文字，也没附加文件，则不继续处理
+    if not user_text and uploaded_file is None:
+        st.stop()
 
-            if mode in RAG_ENABLED_MODES:
-                use_rag = st.checkbox(
-                    "启用文档检索增强 (RAG) ",
-                    value=True,
-                    key=f"use_rag_{mode}"
-                )
+    # -----------------------------
+    # 第三步：构造展示文本和实际提交文本
+    # -----------------------------
+    if uploaded_file_text:
+        submit_raw_text = build_user_display_text(
+            user_text=user_text,
+            uploaded_file_name=uploaded_file_name
+        )
 
-                if use_rag:
-                    rag_top_k = st.slider(
-                        "检索片段数量",
-                        min_value=1,
-                        max_value=5,
-                        value=3,
-                        key=f"rag_top_k_{mode}"
-                    )
-
-                st.caption("启用后，系统会先从上传文档中检索最相关片段，再交给模型处理。")
-
-            preview_limit = 1200
-            preview_text = uploaded_file_text[:preview_limit]
-            if len(uploaded_file_text) > preview_limit:
-                preview_text += "\n\n...[预览已截断，实际处理会使用完整文本]"
-
-            st.text_area(
-                "文件内容预览",
-                value=preview_text,
-                height=180,
-                disabled=True,
-                key=f"file_preview_{mode}"
+        # 开启 RAG: 用户输入作为 query, 文档通过索引供后端检索
+        if use_rag and mode in RAG_ENABLED_MODES:
+            submit_raw_text = user_text or DEFAULT_FILE_MODE_PROMPTS[mode]
+        else:
+            # 不启用 RAG: 沿用“全文直接处理”的方式
+            submit_raw_text = build_non_rag_input_text(
+                user_text=user_text,
+                uploaded_file_name=uploaded_file_name
             )
-
-            use_uploaded_file = st.button(
-                "使用上传文件开始处理",
-                key=f"process_uploaded_file_{mode}",
-                use_container_width=True
-            )
-else:
-    st.caption("当前模式暂不支持文件上传分析。")
-
-
-## -----------------------------
-# 输入框
-# 支持两种输入来源：
-# 1. 手动输入
-# 2. 上传文件后直接处理
-# -----------------------------
-prompt = st.chat_input("请输入您要处理的内容...")
-
-submit_display_text = None   # 用于前端展示的文本
-submit_raw_text = None       # 真正发送给后端的完整文本
-
-# 优先处理手动输入
-if prompt:
-    submit_display_text = prompt
-    submit_raw_text = prompt
-
-# 如果没有手动输入，则判断是否点击了“使用上传文件开始处理”
-elif use_uploaded_file and uploaded_file is not None and uploaded_file_text:
-    submit_display_text = f"【上传文件】{uploaded_file.name}"
-
-    # 如果启用了 RAG，则把“默认任务指令”作为 query
-    # 真正的文档内容通过后端索引来提供
-    if mode in RAG_ENABLED_MODES and use_rag:
-        submit_raw_text = DEFAULT_FILE_MODE_PROMPTS[mode]
     else:
-        # 不启用 RAG 时，继续沿用你当前“直接把全文作为输入”的做法
-        submit_raw_text = uploaded_file_text
+        # 没有文件时，沿用普通文本输入逻辑
+        submit_display_text = user_text
+        submit_raw_text = user_text
 
-if submit_raw_text:
-    # 1. 先展示并保存用户输入（仅写入当前模式）
-    with st.chat_message("user"):
-        st.write(submit_display_text)
-
-    current_messages.append({
-        "role": "user",
-        "content": submit_display_text,
-        "raw_content": submit_raw_text
-    })
-
-    # 如果当前上传文件启用了 RAG，则先确保文档已经索引
-    if uploaded_file is not None and uploaded_file_text and mode in RAG_ENABLED_MODES and use_rag:
+    # -----------------------------
+    # 第四步：如果当前附加了文件并启用 RAG, 则先判断是否需要索引
+    # -----------------------------
+    if uploaded_file_text and use_rag and mode in RAG_ENABLED_MODES:
         text_fingerprint = build_text_fingerprint(uploaded_file_text)
         current_index_state = st.session_state.rag_index_state.get(mode)
 
         need_reindex = (
-                not current_index_state
-                or current_index_state.get("session_id") != current_session_id
-                or current_index_state.get("text_fingerprint") != text_fingerprint
+            not current_index_state
+            or current_index_state.get("session_id") != current_session_id
+            or current_index_state.get("text_fingerprint") != text_fingerprint
         )
 
         if need_reindex:
             success, message = index_uploaded_document(
                 session_id=current_session_id,
-                file_name=uploaded_file.name,
+                file_name=uploaded_file_name,
                 document_text=uploaded_file_text
             )
 
@@ -671,15 +708,31 @@ if submit_raw_text:
 
             st.session_state.rag_index_state[mode] = {
                 "session_id": current_session_id,
-                "file_name": uploaded_file.name,
+                "file_name": uploaded_file_name,
                 "text_fingerprint": text_fingerprint
             }
 
-    # 2. 根据模式决定调用哪个接口
-    is_workflow = mode == "工作流优化"
+    # -----------------------------
+    # 第五步: 展示并写入用户消息
+    # -----------------------------
+    with st.chat_message("user"):
+        st.write(submit_display_text)
+
+    current_messages.append({
+        "role": "user",
+        "content": submit_display_text,
+        "raw_content": submit_raw_text
+    })
+
+    # -----------------------------
+    # 第六步: 根据模式决定调用哪个接口
+    # -----------------------------
+    is_workflow = mode = "工作流优化"
     url = "http://127.0.0.1:8000/workflow_stream" if is_workflow else "http://127.0.0.1:8000/chat_stream"
 
-    # 3. 构造符合 ChatRequest 的请求体
+    # -----------------------------
+    # 第七步: 构造符合 ChatRequest 的请求体并发送
+    # -----------------------------
     payload = {
         "session_id": current_session_id,
         "task_type": MODE_TO_TASK_TYPE[mode],
@@ -691,7 +744,7 @@ if submit_raw_text:
         "rag_top_k": rag_top_k
     }
 
-    # 4. 发送流式请求
+    # 发送流式请求
     response = requests.post(
         url,
         json=payload,
@@ -699,7 +752,7 @@ if submit_raw_text:
         timeout=120
     )
 
-    # 5. 请求失败直接报错
+    # 请求失败直接报错
     if response.status_code != 200:
         st.error(f"请求失败: {response.text}")
     else:
@@ -709,14 +762,12 @@ if submit_raw_text:
 
             # 用于聊天模式的完整文本
             full_response = ""
-
             # 用于工作流模式的分步骤结果
             workflow_blocks: dict[str, str] = {}
-
             # 标记是否收到第一条有效事件，用来清理“思考中”
             first_event_received = False
 
-            # 6. 逐行解析 SSE 事件流
+            # 逐行解析 SSE 事件流
             for raw_line in response.iter_lines():
                 if not raw_line:
                     continue
@@ -743,84 +794,83 @@ if submit_raw_text:
                     placeholder.empty()
                     first_event_received = True
 
-                # 工作流开始 / 步骤开始：可选择显示状态，不强制写入最终结果
-                if event_type in {"workflow_start", "step_start"}:
-                    if is_workflow and step_name:
-                        current_markdown = format_workflow_blocks(workflow_blocks)
-                        if current_markdown:
-                            placeholder.markdown(current_markdown)
+                    # 工作流开始 / 步骤开始：可选择显示状态，不强制写入最终结果
+                    if event_type in {"workflow_start", "step_start"}:
+                        if is_workflow and step_name:
+                            current_markdown = format_workflow_blocks(workflow_blocks)
+                            if current_markdown:
+                                placeholder.markdown(current_markdown)
 
-                # 增量事件：按模式分别处理
-                elif event_type == "delta":
-                    if is_workflow:
+                    # 增量事件：按模式分别处理
+                    elif event_type == "delta":
+                        if is_workflow:
+                            if step_name:
+                                workflow_blocks.setdefault(step_name, "")
+                                workflow_blocks[step_name] += content
+
+                            placeholder.markdown(format_workflow_blocks(workflow_blocks) + "\n\n▌")
+                        else:
+                            full_response += content
+                            placeholder.markdown(full_response + "▌")
+                            time.sleep(0.01)
+
+                    # 步骤完成事件：用于工作流模式的最终分步内容落盘
+                    elif event_type == "step_complete":
                         if step_name:
-                            workflow_blocks.setdefault(step_name, "")
-                            workflow_blocks[step_name] += content
+                            workflow_blocks[step_name] = content
+                            placeholder.markdown(format_workflow_blocks(workflow_blocks))
 
-                        placeholder.markdown(format_workflow_blocks(workflow_blocks) + "\n\n▌")
-                    else:
-                        full_response += content
-                        placeholder.markdown(full_response + "▌")
-                        time.sleep(0.01)
+                    # 最终完成事件
+                    elif event_type == "final":
+                        if is_workflow:
+                            placeholder.markdown(format_workflow_blocks(workflow_blocks))
+                        else:
+                            # 聊天模式下，final.content 可能是完整文本；
+                            # 如果前面 delta 已完整累计，则无需重复追加
+                            if not full_response and content:
+                                full_response = content
+                            placeholder.markdown(full_response)
 
-                # 步骤完成事件：用于工作流模式的最终分步内容落盘
-                elif event_type == "step_complete":
-                    if step_name:
-                        workflow_blocks[step_name] = content
-                        placeholder.markdown(format_workflow_blocks(workflow_blocks))
+                    # 错误事件
+                    elif event_type == "error":
+                        st.error(error_message or "请求失败")
+                        break
 
-                # 最终完成事件
-                elif event_type == "final":
-                    if is_workflow:
-                        placeholder.markdown(format_workflow_blocks(workflow_blocks))
-                    else:
-                        # 聊天模式下，final.content 可能是完整文本；
-                        # 如果前面 delta 已完整累计，则无需重复追加
-                        if not full_response and content:
-                            full_response = content
-                        placeholder.markdown(full_response)
+                # 7. 生成最终写入聊天记录的 assistant 内容（仅写入当前模式）
+                if is_workflow:
+                    final_display_text = format_workflow_blocks(workflow_blocks)
+                else:
+                    final_display_text = full_response
 
-                # 错误事件
-                elif event_type == "error":
-                    st.error(error_message or "请求失败")
-                    break
-
-            # 7. 生成最终写入聊天记录的 assistant 内容（仅写入当前模式）
-            if is_workflow:
-                final_display_text = format_workflow_blocks(workflow_blocks)
-            else:
-                final_display_text = full_response
-
-            # 8. 当前轮结果操作区
-            # 在新结果刚生成时，立即支持：
-            # 1. 整体复制
-            # 2. Markdown 导出
-            # 3. workflow 分步复制
-            if final_display_text.strip():
-                render_result_actions(
-                    result_text=final_display_text,
-                    mode_name=mode,
-                    widget_key_suffix="latest_result"
-                )
-
-                if is_workflow and workflow_blocks:
-                    st.markdown("<div style='height: 0.25rem;'></div>", unsafe_allow_html=True)
-
-                    render_workflow_step_copy_actions(
-                        workflow_blocks=workflow_blocks,
-                        widget_key_suffix="latest_steps"
+                # 当前轮结果操作区, 在新结果刚生成时，立即支持：
+                # - 整体复制
+                # - Markdown 导出
+                # - workflow 分步复制
+                if final_display_text.strip():
+                    render_result_actions(
+                        result_text=final_display_text,
+                        mode_name=mode,
+                        widget_key_suffix="latest_result"
                     )
 
-            # 9. 防止空内容写入历史
-            if final_display_text.strip():
-                assistant_message = {
-                    "role": "assistant",
-                    "content": final_display_text
-                }
+                    if is_workflow and workflow_blocks:
+                        st.markdown("<div style='height: 0.25rem;'></div>", unsafe_allow_html=True)
 
-                # workflow 模式下，把分步结果一并保存到消息里
-                # 这样历史消息也能继续支持“分步复制”
-                if is_workflow and workflow_blocks:
-                    assistant_message["workflow_blocks"] = workflow_blocks.copy()
+                        render_workflow_step_copy_actions(
+                            workflow_blocks=workflow_blocks,
+                            widget_key_suffix="latest_steps"
+                        )
 
-                current_messages.append(assistant_message)
+                # 防止空内容写入历史
+                if final_display_text.strip():
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": final_display_text
+                    }
+
+                    # workflow 模式下，把分步结果一并保存到消息里
+                    # 这样历史消息也能继续支持“分步复制”
+                    if is_workflow and workflow_blocks:
+                        assistant_message["workflow_blocks"] = workflow_blocks.copy()
+
+                    current_messages.append(assistant_message)
