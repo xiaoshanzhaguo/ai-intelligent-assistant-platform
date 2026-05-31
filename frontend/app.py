@@ -389,6 +389,7 @@ def render_result_actions(result_text: str, mode_name: str, widget_key_suffix: s
             file_name=file_name,
             mime="text/markdown",
             key=f"download_md_{widget_key_suffix}",
+            on_click="ignore",
             use_container_width=True,
         )
 
@@ -524,6 +525,41 @@ def clear_indexed_document(session_id: str) -> None:
 
 
 # -----------------------------
+# RAG 控件区
+# 说明：
+# - 控件要放在历史消息前面，否则 Streamlit 重跑后会被历史输出挤到页面下方
+# - 即使当前没附加文件，也先给默认值，保证后续 payload 安全
+# -----------------------------
+use_rag = False
+rag_top_k = 3
+
+
+if mode in RAG_ENABLED_MODES:
+    use_rag = st.checkbox(
+        "启用文档检索增强（RAG）",
+        value=True,
+        key=f"use_rag_{mode}"
+    )
+
+    if use_rag:
+        rag_top_k = st.slider(
+            "检索片段数量",
+            min_value=1,
+            max_value=5,
+            value=3,
+            key=f"rag_top_k_{mode}"
+        )
+
+        st.caption("在附加文档时，系统会先检索相关片段，再交给模型处理。")
+
+        # 取出当前模式对应的索引记录
+        current_index_state = st.session_state.rag_index_state.get(mode)
+        if current_index_state and current_index_state.get("session_id") == current_session_id:
+            file_name = current_index_state.get("file_name", "未命名文件")
+            st.caption(f"当前会话已索引文档：{file_name}")
+
+
+# -----------------------------
 # 展示当前模式的历史消息
 # assistant 消息支持 markdown，便于工作流分段展示
 # 并为 assistant 消息补充：
@@ -582,42 +618,6 @@ if st.sidebar.button("清空全部聊天"):
     st.session_state.rag_index_state = {}
 
     st.rerun()
-
-
-# -----------------------------
-# RAG 控件区
-# 说明：
-# - 只在第一阶段允许的模式中展示
-# - 即使当前没附加文件，也先给默认值，保证后续 payload 安全
-# -----------------------------
-use_rag = False
-rag_top_k = 3
-
-
-if mode in RAG_ENABLED_MODES:
-    use_rag = st.checkbox(
-        "启用文档检索增强（RAG）",
-        value=True,
-        key=f"use_rag_{mode}"
-    )
-
-    if use_rag:
-        rag_top_k = st.slider(
-            "检索片段数量",
-            min_value=1,
-            max_value=5,
-            value=3,
-            key=f"rag_top_k_{mode}"
-        )
-
-        st.caption("在附加文档时，系统会先检索相关片段，再交给模型处理。")
-
-        # 取出当前模式对应的索引记录
-        current_index_state = st.session_state.rag_index_state.get(mode)
-        if current_index_state and current_index_state.get("session_id") == current_session_id:
-            file_name = current_index_state.get("file_name", "未命名文件")
-            st.caption(f"当前会话已索引文档: {file_name}")
-
 
 # -----------------------------
 # 统一输入入口
@@ -783,16 +783,14 @@ if chat_submission:
             # 标记是否收到第一条有效事件，用来清理“思考中”
             first_event_received = False
 
-            # 逐行解析 SSE 事件流
-            for raw_line in response.iter_lines():
+            # 逐行解析 SSE 事件流。chunk_size=1 可以避免小块 SSE 被 requests 缓冲太久。
+            for raw_line in response.iter_lines(chunk_size=1, decode_unicode=True):
                 # 如果这一行是空的，就不处理。SSE 里经常会有空行，用来分隔事件。
                 if not raw_line:
                     # 跳过当前这一轮循环，直接进入下一轮
                     continue
 
-                # raw_line拿到的是字节数据，不是普通字符串。可能是：b'data: {"event_type":"delta","content":"你好"}'
-                # .decode("utf-8")把字节转成真正的字符串
-                raw_text = raw_line.decode("utf-8").strip()
+                raw_text = raw_line.strip()
 
                 # SSE 标准格式：data: {...}
                 if not raw_text.startswith("data: "):
@@ -816,86 +814,83 @@ if chat_submission:
                     placeholder.empty()
                     first_event_received = True
 
-                    # 工作流开始 / 步骤开始：可选择显示状态，不强制写入最终结果
-                    if event_type in {"workflow_start", "step_start"}:
-                        if is_workflow and step_name:
-                            current_markdown = format_workflow_blocks(workflow_blocks)
-                            if current_markdown:
-                                placeholder.markdown(current_markdown)
+                # 工作流开始 / 步骤开始：可选择显示状态，不强制写入最终结果
+                if event_type in {"workflow_start", "step_start"}:
+                    if is_workflow and step_name:
+                        current_markdown = format_workflow_blocks(workflow_blocks)
+                        if current_markdown:
+                            placeholder.markdown(current_markdown)
 
-                    # 增量事件：按模式分别处理
-                    elif event_type == "delta":
-                        if is_workflow:
-                            if step_name:
-                                # 如果 workflow_blocks 里还没有 step_name 这个 key，就先给它一个空字符串。如：{}会变成{"summary": ""}
-                                workflow_blocks.setdefault(step_name, "")
-                                # 把这次新来的内容，拼接到对应步骤后面
-                                workflow_blocks[step_name] += content
-
-                            placeholder.markdown(format_workflow_blocks(workflow_blocks) + "\n\n▌")
-                        else:
-                            full_response += content
-                            placeholder.markdown(full_response + "▌")
-                            # 让流式输出的视觉节奏更自然一点
-                            time.sleep(0.01)
-
-                    # 步骤完成事件：用于工作流模式的最终分步内容落盘
-                    elif event_type == "step_complete":
-                        # 只有确定这条事件确实属于某个步骤，才去写入对应步骤的数据。避免出现：workflow_blocks[None]
+                # 增量事件：按模式分别处理
+                elif event_type == "delta":
+                    if is_workflow:
                         if step_name:
-                            workflow_blocks[step_name] = content
-                            placeholder.markdown(format_workflow_blocks(workflow_blocks))
+                            # 如果 workflow_blocks 里还没有 step_name 这个 key，就先给它一个空字符串。如：{}会变成{"summary": ""}
+                            workflow_blocks.setdefault(step_name, "")
+                            # 把这次新来的内容，拼接到对应步骤后面
+                            workflow_blocks[step_name] += content
 
-                    # 最终完成事件
-                    elif event_type == "final":
-                        if is_workflow:
-                            placeholder.markdown(format_workflow_blocks(workflow_blocks))
-                        else:
-                            # 聊天模式下，final.content 可能是完整文本；如果前面 delta 已完整累计，则无需重复追加
-                            if not full_response and content:
-                                full_response = content
-                            placeholder.markdown(full_response)
+                        placeholder.markdown(format_workflow_blocks(workflow_blocks) + "\n\n▌")
+                    else:
+                        full_response += content
+                        placeholder.markdown(full_response + "▌")
+                        # 让流式输出的视觉节奏更自然一点
+                        time.sleep(0.01)
 
-                    # 错误事件
-                    elif event_type == "error":
-                        st.error(error_message or "请求失败")
-                        break
+                # 步骤完成事件：用于工作流模式的最终分步内容落盘
+                elif event_type == "step_complete":
+                    # 只有确定这条事件确实属于某个步骤，才去写入对应步骤的数据。避免出现：workflow_blocks[None]
+                    if step_name:
+                        workflow_blocks[step_name] = content
+                        placeholder.markdown(format_workflow_blocks(workflow_blocks))
 
-                # 生成最终写入聊天记录的 assistant 内容（仅写入当前模式）
-                if is_workflow:
-                    final_display_text = format_workflow_blocks(workflow_blocks)
-                else:
-                    final_display_text = full_response
+                # 最终完成事件
+                elif event_type == "final":
+                    if is_workflow:
+                        placeholder.markdown(format_workflow_blocks(workflow_blocks))
+                    else:
+                        # 聊天模式下，final.content 可能是完整文本；如果前面 delta 已完整累计，则无需重复追加
+                        if not full_response and content:
+                            full_response = content
+                        placeholder.markdown(full_response)
 
-                # 当前轮结果操作区, 在新结果刚生成时，立即支持：
-                # - 整体复制
-                # - Markdown 导出
-                # - workflow 分步复制
-                if final_display_text.strip():
-                    render_result_actions(
-                        result_text=final_display_text,
-                        mode_name=mode,
-                        widget_key_suffix="latest_result"
+                # 错误事件
+                elif event_type == "error":
+                    st.error(error_message or "请求失败")
+                    break
+
+            # 生成最终写入聊天记录的 assistant 内容（仅写入当前模式）
+            if is_workflow:
+                final_display_text = format_workflow_blocks(workflow_blocks)
+            else:
+                final_display_text = full_response
+
+            # 当前轮结果操作区，在新结果生成后支持复制和导出
+            if final_display_text.strip():
+                render_result_actions(
+                    result_text=final_display_text,
+                    mode_name=mode,
+                    widget_key_suffix="latest_result"
+                )
+
+                if is_workflow and workflow_blocks:
+                    # 插入一个很小的空白间距。unsafe_allow_html=True表示：允许 Streamlit 按 HTML 来渲染这段字符串
+                    st.markdown("<div style='height: 0.25rem;'></div>", unsafe_allow_html=True)
+
+                    render_workflow_step_copy_actions(
+                        workflow_blocks=workflow_blocks,
+                        widget_key_suffix="latest_steps"
                     )
 
-                    if is_workflow and workflow_blocks:
-                        # 插入一个很小的空白间距。unsafe_allow_html=True表示：允许 Streamlit 按 HTML 来渲染这段字符串
-                        st.markdown("<div style='height: 0.25rem;'></div>", unsafe_allow_html=True)
+                # 防止空内容写入历史
+                assistant_message = {
+                    "role": "assistant",
+                    "content": final_display_text
+                }
 
-                        render_workflow_step_copy_actions(
-                            workflow_blocks=workflow_blocks,
-                            widget_key_suffix="latest_steps"
-                        )
+                # workflow 模式下，把分步结果一并保存到消息里，这样历史消息也能继续支持“分步复制”
+                if is_workflow and workflow_blocks:
+                    # 为什么用.copy()？因为 workflow_blocks 是一个字典，可变。.copy() 是复制一份，避免后面原字典变化时，把历史消息里的结果也带着改掉。
+                    assistant_message["workflow_blocks"] = workflow_blocks.copy()
 
-                    # 防止空内容写入历史
-                    assistant_message = {
-                        "role": "assistant",
-                        "content": final_display_text
-                    }
-
-                    # workflow 模式下，把分步结果一并保存到消息里，这样历史消息也能继续支持“分步复制”
-                    if is_workflow and workflow_blocks:
-                        # 为什么用.copy()？因为 workflow_blocks 是一个字典，可变。.copy() 是复制一份，避免后面原字典变化时，把历史消息里的结果也带着改掉。
-                        assistant_message["workflow_blocks"] = workflow_blocks.copy()
-
-                    current_messages.append(assistant_message)
+                current_messages.append(assistant_message)
