@@ -484,7 +484,7 @@ def build_user_display_text(user_text: str, uploaded_file_name: str | None) -> s
     return "\n\n".join(parts).strip() or " 【仅上传附件】"
 
 
-def build_non_rag_input_text(user_text: str, uploaded_file_name: str) -> str:
+def build_non_rag_input_text(user_text: str, uploaded_file_name: str, uploaded_file_text: str) -> str:
     """
     构造“不启用 RAG“时真正发给后端的 input_text。
 
@@ -628,7 +628,7 @@ if mode in RAG_ENABLED_MODES:
 # -----------------------------
 chat_submission = st.chat_input(
     "请输入内容，或直接附加文件后发送...",
-    accept_file=(mode in RAG_ENABLED_MODES),
+    accept_file=(mode in UPLOAD_ENABLED_MODES),
     file_type=CHAT_INPUT_FILE_TYPES if mode in UPLOAD_ENABLED_MODES else None,
     key=f"chat_input_{mode}"
 )
@@ -675,7 +675,7 @@ if chat_submission:
     # 第三步：构造展示文本和实际提交文本
     # -----------------------------
     if uploaded_file_text:
-        submit_raw_text = build_user_display_text(
+        submit_display_text = build_user_display_text(
             user_text=user_text,
             uploaded_file_name=uploaded_file_name
         )
@@ -687,7 +687,8 @@ if chat_submission:
             # 不启用 RAG: 沿用“全文直接处理”的方式
             submit_raw_text = build_non_rag_input_text(
                 user_text=user_text,
-                uploaded_file_name=uploaded_file_name
+                uploaded_file_name=uploaded_file_name,
+                uploaded_file_text=uploaded_file_text
             )
     else:
         # 没有文件时，沿用普通文本输入逻辑
@@ -742,7 +743,7 @@ if chat_submission:
     # -----------------------------
     # 第六步: 根据模式决定调用哪个接口
     # -----------------------------
-    is_workflow = mode = "工作流优化"
+    is_workflow = mode == "工作流优化"
     url = "http://127.0.0.1:8000/workflow_stream" if is_workflow else "http://127.0.0.1:8000/chat_stream"
 
     # -----------------------------
