@@ -120,6 +120,7 @@ if "mode_sessions" not in st.session_state or not st.session_state.mode_sessions
 # 用于记录当前模式下，当前 session 的文档是否已经索引过，避免每次发请求都重新索引。
 # -----------------------------
 if "rag_index_state" not in st.session_state:
+    # 记录“每个模式当前已经索引过哪份文档”
     st.session_state.rag_index_state = {}
 
 # 当前模式对应的会话状态
@@ -147,12 +148,15 @@ def build_history_for_api(messages: list[dict], max_length: int = MAX_HISTORY_LE
     - 文件上传消息优先使用 raw_content, 保证历史上下文仍热是完整文本
     """
     history = []
+    # 只取最后 max_length 条消息
     recent_messages = messages[-max_length:]
 
     for message in recent_messages:
         role = message.get("role")
+        # 核心目的： 上传文件时，前端显示用 content，后端历史用 raw_content
         content = message.get("raw_content", message.get("content", ""))
 
+        # 若角色不合法，就跳过这条消息
         if role not in {"user", "assistant", "system"}:
             continue
 
@@ -205,6 +209,7 @@ def extract_text_from_uploaded_file(uploaded_file) -> tuple[str | None, str | No
     - (None, error_message) 表示失败
     """
     file_name = uploaded_file.name.lower()
+    # 拿到文件的原始字节内容，可以理解为：把上传的文件整个读进内存
     file_bytes = uploaded_file.getvalue()
 
     # 处理 txt / md
@@ -222,14 +227,20 @@ def extract_text_from_uploaded_file(uploaded_file) -> tuple[str | None, str | No
             return None, "当前环境未安装 pypdf, 请先在 requirements.txt 中添加 pypdf 并安装依赖。"
 
         try:
+            # 把上传的 PDF 字节流变成一个可供 PDF 解析器读取的对象
             reader = PdfReader(BytesIO(file_bytes))
+            # 列表，用于收集每一页提取出来的文本
             page_texts = []
 
+            # 遍历PDF的每一页
             for page in reader.pages:
+                # 提取当前页的内容
                 text = page.extract_text() or ""
+                # 如果这页提出的文本不为空，就加进列表
                 if text.strip():
                     page_texts.append(text)
 
+            # 拼接每页内容，变成整份PDF的文本内容
             full_text = "\n\n".join(page_texts).strip()
 
             if not full_text:
@@ -266,13 +277,13 @@ def build_markdown_content(mode_name: str, result_text: str) -> str:
     export_time = time.strftime("%Y-%m-%d %H:%M:%S")
     return f"""# AI 内容分析与创作助手导出结果
 
-- 模式：{mode_name}
-- 导出时间：{export_time}
-
----
-
-{result_text}
-"""
+        - 模式：{mode_name}
+        - 导出时间：{export_time}
+        
+        ---
+        
+        {result_text}
+    """
 
 
 # -----------------------------
@@ -443,7 +454,7 @@ def index_uploaded_document(session_id: str, file_name: str, document_text: str)
             "file_name": file_name,
             "document_text": document_text
         },
-        timeout=60
+        timeout=60 # 请求最多等60秒
     )
 
     if response.status_code != 200:
@@ -469,6 +480,7 @@ def build_user_display_text(user_text: str, uploaded_file_name: str | None) -> s
     if uploaded_file_name:
         parts.append(f"【附件】 {uploaded_file_name}")
 
+    # 如果前面的结果不是空字符串，就返回前面的；如果是空字符串，就返回后面的默认值。
     return "\n\n".join(parts).strip() or " 【仅上传附件】"
 
 
@@ -600,6 +612,7 @@ if mode in RAG_ENABLED_MODES:
 
         st.caption("在附加文档时，系统会先检索相关片段，再交给模型处理。")
 
+        # 取出当前模式对应的索引记录
         current_index_state = st.session_state.rag_index_state.get(mode)
         if current_index_state and current_index_state.get("session_id") == current_session_id:
             file_name = current_index_state.get("file_name", "未命名文件")
@@ -647,10 +660,11 @@ if chat_submission:
     # -----------------------------
     if uploaded_file is not None:
         uploaded_file_name = uploaded_file.name
-        uploaded_file_text, uploded_file_error = extract_text_from_uploaded_file(uploaded_file)
+        uploaded_file_text, uploaded_file_error = extract_text_from_uploaded_file(uploaded_file)
 
         if uploaded_file_error:
             st.error(uploaded_file_error)
+            # 立刻停止本次 Streamlit 脚本的继续执行
             st.stop()
 
     # 如果用户既没输入文字，也没附加文件，则不继续处理
@@ -694,6 +708,7 @@ if chat_submission:
         )
 
         if need_reindex:
+            # 前端告诉后端，进行索引文档操作
             success, message = index_uploaded_document(
                 session_id=current_session_id,
                 file_name=uploaded_file_name,
@@ -738,7 +753,7 @@ if chat_submission:
         "task_type": MODE_TO_TASK_TYPE[mode],
         "input_text": submit_raw_text,
         "persona": mode,
-        "history": build_history_for_api(current_messages[:-1]),
+        "history": build_history_for_api(current_messages[:-1]), # 除了最后一个，前面的都要。current_messages[:-1]含义：当前这条刚追加的用户消息不要算进历史，因为它会单独作为本次的 input_text
         "user_options": {},
         "use_rag": use_rag,
         "rag_top_k": rag_top_k
@@ -769,18 +784,24 @@ if chat_submission:
 
             # 逐行解析 SSE 事件流
             for raw_line in response.iter_lines():
+                # 如果这一行是空的，就不处理。SSE 里经常会有空行，用来分隔事件。
                 if not raw_line:
+                    # 跳过当前这一轮循环，直接进入下一轮
                     continue
 
+                # raw_line拿到的是字节数据，不是普通字符串。可能是：b'data: {"event_type":"delta","content":"你好"}'
+                # .decode("utf-8")把字节转成真正的字符串
                 raw_text = raw_line.decode("utf-8").strip()
 
                 # SSE 标准格式：data: {...}
                 if not raw_text.startswith("data: "):
                     continue
 
+                # 把前面的 "data: " 去掉
                 json_text = raw_text[6:]
 
                 try:
+                    # 把字符串形式的 JSON 变成 Python 可操作的数据结构
                     event = json.loads(json_text)
                 except json.JSONDecodeError:
                     continue
@@ -805,17 +826,21 @@ if chat_submission:
                     elif event_type == "delta":
                         if is_workflow:
                             if step_name:
+                                # 如果 workflow_blocks 里还没有 step_name 这个 key，就先给它一个空字符串。如：{}会变成{"summary": ""}
                                 workflow_blocks.setdefault(step_name, "")
+                                # 把这次新来的内容，拼接到对应步骤后面
                                 workflow_blocks[step_name] += content
 
                             placeholder.markdown(format_workflow_blocks(workflow_blocks) + "\n\n▌")
                         else:
                             full_response += content
                             placeholder.markdown(full_response + "▌")
+                            # 让流式输出的视觉节奏更自然一点
                             time.sleep(0.01)
 
                     # 步骤完成事件：用于工作流模式的最终分步内容落盘
                     elif event_type == "step_complete":
+                        # 只有确定这条事件确实属于某个步骤，才去写入对应步骤的数据。避免出现：workflow_blocks[None]
                         if step_name:
                             workflow_blocks[step_name] = content
                             placeholder.markdown(format_workflow_blocks(workflow_blocks))
@@ -825,8 +850,7 @@ if chat_submission:
                         if is_workflow:
                             placeholder.markdown(format_workflow_blocks(workflow_blocks))
                         else:
-                            # 聊天模式下，final.content 可能是完整文本；
-                            # 如果前面 delta 已完整累计，则无需重复追加
+                            # 聊天模式下，final.content 可能是完整文本；如果前面 delta 已完整累计，则无需重复追加
                             if not full_response and content:
                                 full_response = content
                             placeholder.markdown(full_response)
@@ -836,7 +860,7 @@ if chat_submission:
                         st.error(error_message or "请求失败")
                         break
 
-                # 7. 生成最终写入聊天记录的 assistant 内容（仅写入当前模式）
+                # 生成最终写入聊天记录的 assistant 内容（仅写入当前模式）
                 if is_workflow:
                     final_display_text = format_workflow_blocks(workflow_blocks)
                 else:
@@ -854,6 +878,7 @@ if chat_submission:
                     )
 
                     if is_workflow and workflow_blocks:
+                        # 插入一个很小的空白间距。unsafe_allow_html=True表示：允许 Streamlit 按 HTML 来渲染这段字符串
                         st.markdown("<div style='height: 0.25rem;'></div>", unsafe_allow_html=True)
 
                         render_workflow_step_copy_actions(
@@ -861,16 +886,15 @@ if chat_submission:
                             widget_key_suffix="latest_steps"
                         )
 
-                # 防止空内容写入历史
-                if final_display_text.strip():
+                    # 防止空内容写入历史
                     assistant_message = {
                         "role": "assistant",
                         "content": final_display_text
                     }
 
-                    # workflow 模式下，把分步结果一并保存到消息里
-                    # 这样历史消息也能继续支持“分步复制”
+                    # workflow 模式下，把分步结果一并保存到消息里，这样历史消息也能继续支持“分步复制”
                     if is_workflow and workflow_blocks:
+                        # 为什么用.copy()？因为 workflow_blocks 是一个字典，可变。.copy() 是复制一份，避免后面原字典变化时，把历史消息里的结果也带着改掉。
                         assistant_message["workflow_blocks"] = workflow_blocks.copy()
 
                     current_messages.append(assistant_message)
