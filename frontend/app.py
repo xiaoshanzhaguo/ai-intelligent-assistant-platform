@@ -2,6 +2,7 @@ import json
 import time
 import hashlib
 from io import BytesIO
+from pathlib import Path
 from uuid import uuid4
 
 import requests
@@ -83,6 +84,12 @@ UPLOAD_ENABLED_MODES = {
 }
 
 
+# 构造一个本地文件路径，指向：.../data/chat_history.json
+HISTORY_FILE = Path(__file__).resolve().parents[1] / "data" / "chat_history.json"
+# 当前历史文件的数据结构版本是 1
+HISTORY_VERSION = 1
+
+
 # -----------------------------
 # 工具函数：创建所有模式的会话容器
 # 每个模式都维护自己的 session_id 和 messages
@@ -109,12 +116,130 @@ def create_mode_sessions(mode_names: list[str]) -> dict:
     }
 
 
+def normalize_messages(messages: list) -> list[dict]:
+    """
+    清理本地历史中的消息结构，避免坏数据影响页面渲染。
+    """
+    # 创建一个空列表，用来存放清洗后的消息
+    normalized_messages = []
+
+    for message in messages:
+        # 如果这条消息不是字典，就跳过
+        if not isinstance(message, dict):
+            continue
+
+        role = message.get("role")
+        content = message.get("content")
+
+        if role not in {"user", "assistant", "system"} or not isinstance(content, str):
+            continue
+
+        # 先构造一条“最基础的干净消息”
+        normalized_message = {
+            "role": role,
+            "content": content
+        }
+
+        # 如果这条消息里有 raw_content，并且它是字符串，就保留下来
+        raw_content = message.get("raw_content")
+        if isinstance(raw_content, str):
+            normalized_message["raw_content"] = raw_content
+
+        # 如果这条消息里带了 workflow 的分步结果，并且它是字典，就进一步清洗
+        workflow_blocks = message.get("workflow_blocks")
+        if isinstance(workflow_blocks, dict):
+            normalized_message["workflow_blocks"] = {
+                key: value
+                for key, value in workflow_blocks.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+
+        normalized_messages.append(normalized_message)
+
+    return normalized_messages
+
+
+def load_mode_sessions(mode_names: list[str]) -> dict:
+    """
+    从本地 JSON 文件恢复各模式的会话历史；如果文件不存在、损坏或格式不对，就返回默认空会话。
+    """
+    # 生成一份默认会话。因为后面如果本地文件有问题，就直接返回这份默认值，不会影响页面启动。
+    default_sessions = create_mode_sessions(mode_names)
+
+    # 如果历史文件不存在，直接返回默认空会话。
+    if not HISTORY_FILE.exists():
+        return default_sessions
+
+    try:
+        # 读取历史文件内容，把 JSON 文本解析成 Python 数据。
+        payload = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # 如果文件读失败、JSON格式损坏，直接返回默认空会话。避免因为本地历史文件坏了，整个页面打不开。
+        return default_sessions
+
+    saved_sessions = payload.get("mode_sessions", {})
+    if not isinstance(saved_sessions, dict):
+        return default_sessions
+
+    # 遍历当前支持的每个模式
+    for mode_name in mode_names:
+        # 取出这个模式对应的历史会话
+        saved_session = saved_sessions.get(mode_name)
+        # 如果不是字典，就跳过这个模式。
+        if not isinstance(saved_session, dict):
+            continue
+
+        session_id = saved_session.get("session_id")
+        messages = saved_session.get("messages", [])
+
+        # 把当前模式的默认会话，替换成”本地恢复后的会话“
+        default_sessions[mode_name] = {
+            "session_id": str(session_id) if session_id else str(uuid4()),
+            "messages": normalize_messages(messages if isinstance(messages, list) else [])
+        }
+
+    return default_sessions
+
+
+def save_mode_sessions(mode_sessions: dict) -> None:
+    """
+    把当前所有模式的会话历史保存到本地 JSON 文件。
+    """
+    try:
+        # 如果历史文件所在目录不存在，则自动创建目录，避免写文件时报错
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HISTORY_FILE.write_text(
+            # 把 Python 字典转成 JSON 字符串
+            json.dumps(
+                {
+                    "version": HISTORY_VERSION,
+                    "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"), # format time as string，把时间格式化成字符串
+                    "mode_sessions": mode_sessions
+                },
+                ensure_ascii=False, # 允许中文正常保存，而不是变成 \u4f60\u597d
+                indent=2 # 让 JSON 更好读，有缩进格式
+            ),
+            encoding="utf-8"
+        )
+    except OSError:
+        # 本地历史保存失败不应阻断主流程，刷新后无法恢复即可由用户重新发起。
+        pass
+
+
 # -----------------------------
 # Session State 初始化
 # 如果不存在，或被清空为 {}，则重新初始化
 # -----------------------------
 if "mode_sessions" not in st.session_state or not st.session_state.mode_sessions:
-    st.session_state.mode_sessions = create_mode_sessions(AVAILABLE_MODES)
+    # 页面初始化时优先从本地历史文件恢复 mode_sessions，不再每次刷新都创建空会话
+    st.session_state.mode_sessions = load_mode_sessions(AVAILABLE_MODES)
+
+for mode_name in AVAILABLE_MODES:
+    if mode_name not in st.session_state.mode_sessions:
+        st.session_state.mode_sessions[mode_name] = {
+            "session_id": str(uuid4()),
+            "messages": []
+        }
 
 # -----------------------------
 # 用于记录当前模式下，当前 session 的文档是否已经索引过，避免每次发请求都重新索引。
@@ -611,6 +736,8 @@ if st.sidebar.button("新建当前模式聊天"):
 
     # 同步清理前端记录的索引状态
     st.session_state.rag_index_state.pop(mode, None)
+    # 新建当前模式聊天时，同步更新本地历史文件
+    save_mode_sessions(st.session_state.mode_sessions)
 
     st.rerun()
 
@@ -625,6 +752,8 @@ if st.sidebar.button("清空全部聊天"):
 
     # 清空前端索引状态缓存
     st.session_state.rag_index_state = {}
+    # 清空全部聊天时，同步更新本地历史文件
+    save_mode_sessions(st.session_state.mode_sessions)
 
     st.rerun()
 
@@ -748,6 +877,8 @@ if chat_submission:
         "content": submit_display_text,
         "raw_content": submit_raw_text
     })
+    # 用户发送消息后立即保存历史
+    save_mode_sessions(st.session_state.mode_sessions)
 
     # -----------------------------
     # 第六步: 根据模式决定调用哪个接口
@@ -905,3 +1036,5 @@ if chat_submission:
                     assistant_message["workflow_blocks"] = workflow_blocks.copy()
 
                 current_messages.append(assistant_message)
+                # 助手回复完成后再次保存历史
+                save_mode_sessions(st.session_state.mode_sessions)
