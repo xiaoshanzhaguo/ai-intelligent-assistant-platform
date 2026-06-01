@@ -1,19 +1,31 @@
-import json
 import time
-import hashlib
-from io import BytesIO
-from pathlib import Path
 from uuid import uuid4
 
-import requests
 import streamlit as st
-import streamlit.components.v1 as components
 
-
-try:
-    from pypdf import PdfReader
-except ImportError:
-    PdfReader = None
+from frontend.api_client import (
+    clear_indexed_document,
+    index_uploaded_document,
+    iter_sse_events,
+    post_stream_request,
+)
+from frontend.file_parser import (
+    build_non_rag_input_text,
+    build_text_fingerprint,
+    build_user_display_text,
+    extract_text_from_uploaded_file,
+)
+from frontend.renderers import (
+    format_workflow_blocks,
+    render_result_actions,
+    render_workflow_step_copy_actions,
+)
+from frontend.state_manager import (
+    build_history_for_api,
+    ensure_mode_sessions,
+    load_mode_sessions,
+    save_mode_sessions,
+)
 
 
 # -----------------------------
@@ -84,148 +96,6 @@ UPLOAD_ENABLED_MODES = {
 }
 
 
-# 构造一个本地文件路径，指向：.../data/chat_history.json
-HISTORY_FILE = Path(__file__).resolve().parents[1] / "data" / "chat_history.json"
-# 当前历史文件的数据结构版本是 1
-HISTORY_VERSION = 1
-
-
-# -----------------------------
-# 工具函数：创建所有模式的会话容器
-# 每个模式都维护自己的 session_id 和 messages
-# -----------------------------
-def create_mode_sessions(mode_names: list[str]) -> dict:
-    """
-    为所有模式初始化独立会话。
-
-    返回格式：
-    {
-        "内容分析": {
-            "session_id": "...",
-            "messages": []
-        },
-        ...
-    }
-    """
-    return {
-        mode_name: {
-            "session_id": str(uuid4()),
-            "messages": []
-        }
-        for mode_name in mode_names
-    }
-
-
-def normalize_messages(messages: list) -> list[dict]:
-    """
-    清理本地历史中的消息结构，避免坏数据影响页面渲染。
-    """
-    # 创建一个空列表，用来存放清洗后的消息
-    normalized_messages = []
-
-    for message in messages:
-        # 如果这条消息不是字典，就跳过
-        if not isinstance(message, dict):
-            continue
-
-        role = message.get("role")
-        content = message.get("content")
-
-        if role not in {"user", "assistant", "system"} or not isinstance(content, str):
-            continue
-
-        # 先构造一条“最基础的干净消息”
-        normalized_message = {
-            "role": role,
-            "content": content
-        }
-
-        # 如果这条消息里有 raw_content，并且它是字符串，就保留下来
-        raw_content = message.get("raw_content")
-        if isinstance(raw_content, str):
-            normalized_message["raw_content"] = raw_content
-
-        # 如果这条消息里带了 workflow 的分步结果，并且它是字典，就进一步清洗
-        workflow_blocks = message.get("workflow_blocks")
-        if isinstance(workflow_blocks, dict):
-            normalized_message["workflow_blocks"] = {
-                key: value
-                for key, value in workflow_blocks.items()
-                if isinstance(key, str) and isinstance(value, str)
-            }
-
-        normalized_messages.append(normalized_message)
-
-    return normalized_messages
-
-
-def load_mode_sessions(mode_names: list[str]) -> dict:
-    """
-    从本地 JSON 文件恢复各模式的会话历史；如果文件不存在、损坏或格式不对，就返回默认空会话。
-    """
-    # 生成一份默认会话。因为后面如果本地文件有问题，就直接返回这份默认值，不会影响页面启动。
-    default_sessions = create_mode_sessions(mode_names)
-
-    # 如果历史文件不存在，直接返回默认空会话。
-    if not HISTORY_FILE.exists():
-        return default_sessions
-
-    try:
-        # 读取历史文件内容，把 JSON 文本解析成 Python 数据。
-        payload = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        # 如果文件读失败、JSON格式损坏，直接返回默认空会话。避免因为本地历史文件坏了，整个页面打不开。
-        return default_sessions
-
-    saved_sessions = payload.get("mode_sessions", {})
-    if not isinstance(saved_sessions, dict):
-        return default_sessions
-
-    # 遍历当前支持的每个模式
-    for mode_name in mode_names:
-        # 取出这个模式对应的历史会话
-        saved_session = saved_sessions.get(mode_name)
-        # 如果不是字典，就跳过这个模式。
-        if not isinstance(saved_session, dict):
-            continue
-
-        session_id = saved_session.get("session_id")
-        messages = saved_session.get("messages", [])
-
-        # 把当前模式的默认会话，替换成”本地恢复后的会话“
-        default_sessions[mode_name] = {
-            "session_id": str(session_id) if session_id else str(uuid4()),
-            "messages": normalize_messages(messages if isinstance(messages, list) else [])
-        }
-
-    return default_sessions
-
-
-def save_mode_sessions(mode_sessions: dict) -> None:
-    """
-    把当前所有模式的会话历史保存到本地 JSON 文件。
-    """
-    try:
-        # 如果历史文件所在目录不存在，则自动创建目录，避免写文件时报错
-        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        HISTORY_FILE.write_text(
-            # 把 Python 字典转成 JSON 字符串
-            json.dumps(
-                {
-                    "version": HISTORY_VERSION,
-                    "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"), # format time as string，把时间格式化成字符串
-                    "mode_sessions": mode_sessions
-                },
-                ensure_ascii=False, # 允许中文正常保存，而不是变成 \u4f60\u597d
-                indent=2 # 让 JSON 更好读，有缩进格式
-            ),
-            encoding="utf-8"
-        )
-    except OSError:
-        # 本地历史保存失败不应阻断主流程，刷新后无法恢复即可由用户重新发起。
-        pass
-
-
 # -----------------------------
 # Session State 初始化
 # 如果不存在，或被清空为 {}，则重新初始化
@@ -234,12 +104,11 @@ if "mode_sessions" not in st.session_state or not st.session_state.mode_sessions
     # 页面初始化时优先从本地历史文件恢复 mode_sessions，不再每次刷新都创建空会话
     st.session_state.mode_sessions = load_mode_sessions(AVAILABLE_MODES)
 
-for mode_name in AVAILABLE_MODES:
-    if mode_name not in st.session_state.mode_sessions:
-        st.session_state.mode_sessions[mode_name] = {
-            "session_id": str(uuid4()),
-            "messages": []
-        }
+# 确保所有当前支持的模式都有会话容器
+st.session_state.mode_sessions = ensure_mode_sessions(
+    st.session_state.mode_sessions,
+    AVAILABLE_MODES
+)
 
 # -----------------------------
 # 用于记录当前模式下，当前 session 的文档是否已经索引过，避免每次发请求都重新索引。
@@ -252,410 +121,6 @@ if "rag_index_state" not in st.session_state:
 current_session = st.session_state.mode_sessions[mode]
 current_session_id = current_session["session_id"]
 current_messages = current_session["messages"]
-
-
-# -----------------------------
-# 工具函数：将前端消息历史转换为后端 schema 需要的 history 格式
-# 只保留最近 N 轮，避免上下文过长
-# -----------------------------
-MAX_HISTORY_LENGTH = 6
-
-
-def build_history_for_api(messages: list[dict], max_length: int = MAX_HISTORY_LENGTH) -> list[dict]:
-    """
-    将前端消息列表裁剪并转换为后端可直接接收的 history 结构。
-
-    每条消息保留：
-    - role
-    - content
-    说明:
-    - 普通文本输入直接使用 content
-    - 文件上传消息优先使用 raw_content, 保证历史上下文仍热是完整文本
-    """
-    history = []
-    # 只取最后 max_length 条消息
-    recent_messages = messages[-max_length:]
-
-    for message in recent_messages:
-        role = message.get("role")
-        # 核心目的： 上传文件时，前端显示用 content，后端历史用 raw_content
-        content = message.get("raw_content", message.get("content", ""))
-
-        # 若角色不合法，就跳过这条消息
-        if role not in {"user", "assistant", "system"}:
-            continue
-
-        history.append({
-            "role": role,
-            "content": content
-        })
-
-    return history
-
-
-# -----------------------------
-# 工具函数：格式化工作流步骤输出
-# 将 step_name 转成更友好的中文标题
-# -----------------------------
-STEP_TITLE_MAP = {
-    "summary": "🧠 内容总结",
-    "analysis": "🔍 问题分析",
-    "suggestion": "✨ 优化建议"
-}
-
-
-def format_workflow_blocks(workflow_blocks: dict[str, str]) -> str:
-    """
-    将工作流分步骤结果格式化为 Markdown 展示。
-    """
-    formatted_parts = []
-
-    for step_name in ["summary", "analysis", "suggestion"]:
-        content = workflow_blocks.get(step_name, "").strip()
-        if not content:
-            continue
-
-        title = STEP_TITLE_MAP.get(step_name, step_name)
-        formatted_parts.append(f"### {title}\n\n{content}\n")
-
-    return "\n\n".join(formatted_parts)
-
-
-# -----------------------------
-# 工具函数：从上传文件中提取文本
-# 支持 txt / md / pdf
-# -----------------------------
-def extract_text_from_uploaded_file(uploaded_file) -> tuple[str | None, str | None]:
-    """
-    从上传文件中提取文本。
-
-    返回:
-    - (text, None) 表示成功
-    - (None, error_message) 表示失败
-    """
-    file_name = uploaded_file.name.lower()
-    # 拿到文件的原始字节内容，可以理解为：把上传的文件整个读进内存
-    file_bytes = uploaded_file.getvalue()
-
-    # 处理 txt / md
-    if file_name.endswith(".txt") or file_name.endswith(".md"):
-        for encoding in ("utf-8", "utf-8-sig", "gbk"):
-            try:
-                # 把“字节数据”按某种编码规则，转换成“字符串文本”
-                return file_bytes.decode(encoding), None
-            except UnicodeDecodeError:
-                continue
-        return None, "文件编码无法识别, 请尝试使用 UTF-8 编码保存后再上传。"
-
-    # 处理pdf
-    if file_name.endswith(".pdf"):
-        if PdfReader is None:
-            return None, "当前环境未安装 pypdf, 请先在 requirements.txt 中添加 pypdf 并安装依赖。"
-
-        try:
-            # 把上传的 PDF 字节流变成一个可供 PDF 解析器读取的对象。BytesIO 的作用：把内存里的 bytes，包装成一个“像文件一样可以读取的对象”
-            reader = PdfReader(BytesIO(file_bytes))
-            # 列表，用于收集每一页提取出来的文本
-            page_texts = []
-
-            # 遍历PDF的每一页
-            for page in reader.pages:
-                # 提取当前页的内容
-                text = page.extract_text() or ""
-                # 如果这页提出的文本不为空，就加进列表
-                if text.strip():
-                    page_texts.append(text)
-
-            # 拼接每页内容，变成整份PDF的文本内容
-            full_text = "\n\n".join(page_texts).strip()
-
-            if not full_text:
-                return None, "PDF 中未提取到可用文本。若这是扫描版 PDF, 后续需要 OCR 才能支持。"
-
-            return full_text, None
-        except Exception as e:
-            return None, f"PDF 解析失败: {str(e)}"
-
-    return None, "暂不支持该文件类型, 请上传 txt、md 或 pdf 文件。"
-
-
-# -----------------------------
-# 工具函数：生成 Markdown 文件名
-# mode_name 用于区分不同模式导出的结果
-# -----------------------------
-def build_markdown_filename(mode_name: str) -> str:
-    """
-    生成 Markdown 导出文件名。
-    """
-    # 生成当前时间字符串，格式为：年月日_时分秒。如：20260601_153045
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    safe_mode_name = mode_name.replace(" ", "_")
-    return f"{safe_mode_name}_result_{timestamp}.md"
-
-
-# -----------------------------
-# 工具函数：构造 Markdown 导出内容
-# 为导出的文件增加标题和模式信息
-# -----------------------------
-def build_markdown_content(mode_name: str, result_text: str) -> str:
-    """
-    将结果包装成更完整的 Markdown 文本，便于导出保存。
-    """
-    export_time = time.strftime("%Y-%m-%d %H:%M:%S")
-    return (
-        "# AI 内容分析与创作助手导出结果\n\n"
-        f"- 模式：{mode_name}\n"
-        f"- 导出时间：{export_time}\n\n"
-        "---\n\n"
-        f"{result_text.strip()}\n"
-    )
-
-
-# -----------------------------
-# 工具函数：渲染复制按钮
-# 通过内嵌 HTML + JS 将结果复制到系统剪贴板
-# -----------------------------
-def render_copy_button(text: str, label: str, button_id_suffix: str) -> None:
-    """
-    渲染一个复制按钮，用于将指定文本复制到剪贴板。
-
-    :param text: 需要复制的文本内容
-    :param label: 按钮上显示的文字
-    :param button_id_suffix: 用于生成唯一按钮 ID，避免多个按钮冲突
-    :return: None
-    """
-    button_id = f"copy_btn_{button_id_suffix}_{uuid4().hex}"
-
-    components.html(
-        f"""
-        <html>
-        <head>
-            <style>
-                html, body {{
-                    margin: 0;
-                    padding: 0;
-                    background: transparent;
-                    overflow: hidden;
-                }}
-
-                .copy-btn {{
-                    width: 100%;
-                    height: 38px;
-                    border: 1px solid #d0d7de;
-                    border-radius: 0.5rem;
-                    background: white;
-                    color: #111827;
-                    font-size: 0.95rem;
-                    cursor: pointer;
-                    box-sizing: border-box;
-                }}
-
-                .copy-btn:hover {{
-                    background: #f9fafb;
-                }}
-            </style>
-        </head>
-        <body>
-            <button id="{button_id}" class="copy-btn">{label}</button>
-
-            <script>
-                const btn = document.getElementById("{button_id}");
-                btn.onclick = async () => {{
-                    try {{
-                        await navigator.clipboard.writeText({json.dumps(text)});
-                        const oldText = btn.innerText;
-                        btn.innerText = "已复制";
-                        setTimeout(() => btn.innerText = oldText, 1500);
-                    }} catch (err) {{
-                        const oldText = btn.innerText;
-                        btn.innerText = "复制失败";
-                        setTimeout(() => btn.innerText = oldText, 1500);
-                    }}
-                }};
-            </script>
-        </body>
-        </html>
-        """,
-        height=40,
-    )
-
-
-# -----------------------------
-# 工具函数：渲染结果操作区
-# 包括：
-# 1. 复制当前结果
-# 2. 导出 Markdown
-# -----------------------------
-def render_result_actions(result_text: str, mode_name: str, widget_key_suffix: str) -> None:
-    """
-    为 assistant 结果渲染操作按钮：
-    1. 复制当前结果
-    2. 导出 Markdown
-    """
-    if not result_text.strip():
-        return
-
-    markdown_content = build_markdown_content(mode_name, result_text)
-    file_name = build_markdown_filename(mode_name)
-
-    # 创建两列布局
-    col1, col2 = st.columns(2, gap="small")
-
-    # with col1: 表示下面这一小段组件渲染到左边那一列里。
-    with col1:
-        # 在左列渲染复制按钮
-        render_copy_button(
-            text=result_text,
-            label="复制当前结果",
-            button_id_suffix=widget_key_suffix
-        )
-
-    with col2:
-        st.download_button(
-            label="导出 Markdown",
-            data=markdown_content.encode("utf-8-sig"), # 下载的内容本体，带 BOM 便于 Windows 编辑器识别中文
-            file_name=file_name,
-            mime="text/markdown; charset=utf-8", # 告诉浏览器这是 UTF-8 Markdown 文本文件
-            key=f"download_md_{widget_key_suffix}", # 确保这个按钮在 Streamlit 里是唯一的
-            on_click="ignore", # 点击后忽略默认点击行为带来的额外处理，只保留当前组件本身想做的事情
-            use_container_width=True, # 按钮宽度撑满这一列
-        )
-
-
-# -----------------------------
-# 工具函数：渲染 workflow 结果操作区
-# 支持单独复制：内容总结、问题分析、优化建议
-# -----------------------------
-def render_workflow_step_copy_actions(workflow_blocks: dict[str, str], widget_key_suffix: str) -> None:
-    """
-    为 workflow 结果渲染“分步复制”按钮。
-    默认折叠，避免界面过于拥挤。
-    :param workflow_blocks: workflow 三个步骤的结果字典
-    :param widget_key_suffix: 唯一后缀，防止按钮 key 冲突
-    """
-    # 如果没有 workflow 数据，就不用渲染任何东西
-    if not workflow_blocks:
-        return
-
-    # 创建一个可折叠区域，标题叫“分步复制”，默认收起
-    with st.expander("分步复制", expanded=False):
-        # 创建三列布局，用来放三个按钮
-        col1, col2, col3 = st.columns(3, gap="small")
-
-        with col1:
-            summary_text = workflow_blocks.get("summary", "").strip()
-            # 如果这一步确实有内容，才显示按钮
-            if summary_text:
-                render_copy_button(
-                    text=summary_text,
-                    label="复制总结",
-                    button_id_suffix=f"{widget_key_suffix}_summary"
-                )
-
-        with col2:
-            analysis_text = workflow_blocks.get("analysis", "").strip()
-            if analysis_text:
-                render_copy_button(
-                    text=analysis_text,
-                    label="复制问题",
-                    button_id_suffix=f"{widget_key_suffix}_analysis"
-                )
-
-        with col3:
-            suggestion_text = workflow_blocks.get("suggestion", "").strip()
-            if suggestion_text:
-                render_copy_button(
-                    text=suggestion_text,
-                    label="复制建议",
-                    button_id_suffix=f"{widget_key_suffix}_suggestion"
-                )
-
-
-def build_text_fingerprint(text: str) -> str:
-    """
-    为文档生成一个简单指纹，用于判断是否需要重新索引。
-    """
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
-
-
-def index_uploaded_document(session_id: str, file_name: str, document_text: str) -> tuple[bool, str]:
-    """
-    调用后端 /index_document 接口，为当前会话建立临时文档索引。
-    """
-    response = requests.post(
-        "http://127.0.0.1:8000/index_document",
-        json={
-            "session_id": session_id,
-            "file_name": file_name,
-            "document_text": document_text
-        },
-        timeout=60 # 请求最多等60秒
-    )
-
-    if response.status_code != 200:
-        return False, f"文档索引失败: {response.text}"
-
-    result = response.json()
-    return True, f"文档索引完成，共切分 {result['chunk_count']} 个文本块。"
-
-
-def build_user_display_text(user_text: str, uploaded_file_name: str | None) -> str:
-    """
-    构造聊天区展示给用户看的输入文本。
-
-    说明:
-    - 如果用户既输入了问题，又附加了文件，则两者都显示
-    - 如果用户只附加文件，则显示附件名称
-    """
-    parts = []
-
-    if user_text.strip():
-        parts.append(user_text.strip())
-
-    if uploaded_file_name:
-        parts.append(f"【附件】 {uploaded_file_name}")
-
-    # 如果前面的结果不是空字符串，就返回前面的；如果是空字符串，就返回后面的默认值。
-    return "\n\n".join(parts).strip() or " 【仅上传附件】"
-
-
-def build_non_rag_input_text(user_text: str, uploaded_file_name: str, uploaded_file_text: str) -> str:
-    """
-    构造“不启用 RAG“时真正发给后端的 input_text。
-
-    说明：
-    - 如果只有文件，没有额外问题，则直接把全文作为输入
-    - 如果用户还补充了问题或要求，则把“文件全文 + 用户要求”一起发给后端
-    """
-    clean_user_text = user_text.strip()
-
-    if clean_user_text:
-        return (
-            "以下是用户上传的文档内容：\n\n"
-            f"{uploaded_file_text}\n\n"
-            "用户的处理要求如下: \n"
-            f"{clean_user_text}"
-        )
-
-    return uploaded_file_text
-
-
-def clear_indexed_document(session_id: str) -> None:
-    """
-    调用后端清理接口，删除某个 session 对应的临时文档索引。
-
-    说明：
-    - 该函数不阻断主流程
-    - 即使清理失败，也不影响前端继续新建会话
-    """
-    try:
-        requests.delete(
-            f"http://127.0.0.1:8000/clear_document/{session_id}",
-            timeout=10
-        )
-    except Exception:
-        # 第一阶段先做静默失败，避免清理动作影响主流程
-        pass
 
 
 # -----------------------------
@@ -827,7 +292,6 @@ if chat_submission:
             # 不启用 RAG: 沿用“全文直接处理”的方式
             submit_raw_text = build_non_rag_input_text(
                 user_text=user_text,
-                uploaded_file_name=uploaded_file_name,
                 uploaded_file_text=uploaded_file_text
             )
     else:
@@ -887,7 +351,6 @@ if chat_submission:
     # -----------------------------
     task_type = MODE_TO_TASK_TYPE[mode]
     is_workflow = task_type == "workflow"
-    url = "http://127.0.0.1:8000/workflow_stream" if is_workflow else "http://127.0.0.1:8000/chat_stream"
 
     # -----------------------------
     # 第七步: 构造符合 ChatRequest 的请求体并发送
@@ -904,12 +367,7 @@ if chat_submission:
     }
 
     # 发送流式请求
-    response = requests.post(
-        url,
-        json=payload,
-        stream=True,
-        timeout=120
-    )
+    response = post_stream_request(payload, is_workflow)
 
     # 请求失败直接报错
     if response.status_code != 200:
@@ -926,28 +384,8 @@ if chat_submission:
             # 标记是否收到第一条有效事件，用来清理“思考中”
             first_event_received = False
 
-            # 逐行解析 SSE 事件流。chunk_size=1 可以避免小块 SSE 被 requests 缓冲太久。
-            for raw_line in response.iter_lines(chunk_size=1, decode_unicode=True):
-                # 如果这一行是空的，就不处理。SSE 里经常会有空行，用来分隔事件。
-                if not raw_line:
-                    # 跳过当前这一轮循环，直接进入下一轮
-                    continue
-
-                raw_text = raw_line.strip()
-
-                # SSE 标准格式：data: {...}
-                if not raw_text.startswith("data: "):
-                    continue
-
-                # 把前面的 "data: " 去掉
-                json_text = raw_text[6:]
-
-                try:
-                    # 把字符串形式的 JSON 变成 Python 可操作的数据结构
-                    event = json.loads(json_text)
-                except json.JSONDecodeError:
-                    continue
-
+            # 逐行解析 SSE 事件流
+            for event in iter_sse_events(response):
                 event_type = event.get("event_type")
                 step_name = event.get("step_name")
                 content = event.get("content", "")
