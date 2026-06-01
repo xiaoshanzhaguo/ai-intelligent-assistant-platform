@@ -216,6 +216,7 @@ def extract_text_from_uploaded_file(uploaded_file) -> tuple[str | None, str | No
     if file_name.endswith(".txt") or file_name.endswith(".md"):
         for encoding in ("utf-8", "utf-8-sig", "gbk"):
             try:
+                # 把“字节数据”按某种编码规则，转换成“字符串文本”
                 return file_bytes.decode(encoding), None
             except UnicodeDecodeError:
                 continue
@@ -227,7 +228,7 @@ def extract_text_from_uploaded_file(uploaded_file) -> tuple[str | None, str | No
             return None, "当前环境未安装 pypdf, 请先在 requirements.txt 中添加 pypdf 并安装依赖。"
 
         try:
-            # 把上传的 PDF 字节流变成一个可供 PDF 解析器读取的对象
+            # 把上传的 PDF 字节流变成一个可供 PDF 解析器读取的对象。BytesIO 的作用：把内存里的 bytes，包装成一个“像文件一样可以读取的对象”
             reader = PdfReader(BytesIO(file_bytes))
             # 列表，用于收集每一页提取出来的文本
             page_texts = []
@@ -261,6 +262,7 @@ def build_markdown_filename(mode_name: str) -> str:
     """
     生成 Markdown 导出文件名。
     """
+    # 生成当前时间字符串，格式为：年月日_时分秒。如：20260601_153045
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     safe_mode_name = mode_name.replace(" ", "_")
     return f"{safe_mode_name}_result_{timestamp}.md"
@@ -373,9 +375,12 @@ def render_result_actions(result_text: str, mode_name: str, widget_key_suffix: s
     markdown_content = build_markdown_content(mode_name, result_text)
     file_name = build_markdown_filename(mode_name)
 
+    # 创建两列布局
     col1, col2 = st.columns(2, gap="small")
 
+    # with col1: 表示下面这一小段组件渲染到左边那一列里。
     with col1:
+        # 在左列渲染复制按钮
         render_copy_button(
             text=result_text,
             label="复制当前结果",
@@ -385,12 +390,12 @@ def render_result_actions(result_text: str, mode_name: str, widget_key_suffix: s
     with col2:
         st.download_button(
             label="导出 Markdown",
-            data=markdown_content,
+            data=markdown_content, # 下载的内容本体
             file_name=file_name,
-            mime="text/markdown",
-            key=f"download_md_{widget_key_suffix}",
-            on_click="ignore",
-            use_container_width=True,
+            mime="text/markdown", # 告诉浏览器这是 Markdown 文本文件
+            key=f"download_md_{widget_key_suffix}", # 确保这个按钮在 Streamlit 里是唯一的
+            on_click="ignore", # 点击后忽略默认点击行为带来的额外处理，只保留当前组件本身想做的事情
+            use_container_width=True, # 按钮宽度撑满这一列
         )
 
 
@@ -402,15 +407,21 @@ def render_workflow_step_copy_actions(workflow_blocks: dict[str, str], widget_ke
     """
     为 workflow 结果渲染“分步复制”按钮。
     默认折叠，避免界面过于拥挤。
+    :param workflow_blocks: workflow 三个步骤的结果字典
+    :param widget_key_suffix: 唯一后缀，防止按钮 key 冲突
     """
+    # 如果没有 workflow 数据，就不用渲染任何东西
     if not workflow_blocks:
         return
 
+    # 创建一个可折叠区域，标题叫“分步复制”，默认收起
     with st.expander("分步复制", expanded=False):
+        # 创建三列布局，用来放三个按钮
         col1, col2, col3 = st.columns(3, gap="small")
 
         with col1:
             summary_text = workflow_blocks.get("summary", "").strip()
+            # 如果这一步确实有内容，才显示按钮
             if summary_text:
                 render_copy_button(
                     text=summary_text,
@@ -810,6 +821,7 @@ if chat_submission:
                 content = event.get("content", "")
                 error_message = event.get("error_message")
 
+                # 第一次真正收到返回内容时，把‘思考中’提示移除，并标记后面不要再重复处理。
                 if not first_event_received:
                     placeholder.empty()
                     first_event_received = True
@@ -847,9 +859,10 @@ if chat_submission:
                 # 最终完成事件
                 elif event_type == "final":
                     if is_workflow:
+                        # 把当前已经积累好的 workflow_blocks 最终渲染一次
                         placeholder.markdown(format_workflow_blocks(workflow_blocks))
                     else:
-                        # 聊天模式下，final.content 可能是完整文本；如果前面 delta 已完整累计，则无需重复追加
+                        # 如果前面没累计到内容，但 final 给了完整结果，那就拿 final.content 兜底
                         if not full_response and content:
                             full_response = content
                         placeholder.markdown(full_response)
