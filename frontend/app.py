@@ -885,7 +885,8 @@ if chat_submission:
     # -----------------------------
     # 第六步: 根据模式决定调用哪个接口
     # -----------------------------
-    is_workflow = mode == "工作流优化"
+    task_type = MODE_TO_TASK_TYPE[mode]
+    is_workflow = task_type == "workflow"
     url = "http://127.0.0.1:8000/workflow_stream" if is_workflow else "http://127.0.0.1:8000/chat_stream"
 
     # -----------------------------
@@ -893,7 +894,7 @@ if chat_submission:
     # -----------------------------
     payload = {
         "session_id": current_session_id,
-        "task_type": MODE_TO_TASK_TYPE[mode],
+        "task_type": task_type,
         "input_text": submit_raw_text,
         "persona": mode,
         "history": build_history_for_api(current_messages[:-1]), # 除了最后一个，前面的都要。current_messages[:-1]含义：当前这条刚追加的用户消息不要算进历史，因为它会单独作为本次的 input_text
