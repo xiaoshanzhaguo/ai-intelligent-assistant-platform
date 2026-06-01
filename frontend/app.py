@@ -741,18 +741,20 @@ if st.sidebar.button("新建当前模式聊天"):
 
     st.rerun()
 
-if st.sidebar.button("清空全部聊天"):
-    # 先清理所有模式当前 session 对应的后端 RAG 索引
-    for mode_name, session_info in st.session_state.mode_sessions.items():
-        old_session_id = session_info["session_id"]
-        clear_indexed_document(old_session_id)
+if st.sidebar.button("清空当前模式聊天"):
+    # 只清理当前模式 session 对应的后端 RAG 索引，避免误删其他模式历史
+    old_session_id = st.session_state.mode_sessions[mode]["session_id"]
+    clear_indexed_document(old_session_id)
 
-    # 再重置所有模式会话
-    st.session_state.mode_sessions = create_mode_sessions(AVAILABLE_MODES)
+    # 只重置当前模式会话
+    st.session_state.mode_sessions[mode] = {
+        "session_id": str(uuid4()),
+        "messages": []
+    }
 
-    # 清空前端索引状态缓存
-    st.session_state.rag_index_state = {}
-    # 清空全部聊天时，同步更新本地历史文件
+    # 只清空当前模式的前端索引状态缓存
+    st.session_state.rag_index_state.pop(mode, None)
+    # 清空当前模式聊天时，同步更新本地历史文件
     save_mode_sessions(st.session_state.mode_sessions)
 
     st.rerun()
